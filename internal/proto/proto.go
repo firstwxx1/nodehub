@@ -2,7 +2,7 @@
 package proto
 
 // AgentVersion is bumped whenever the agent changes in a way the master cares about.
-const AgentVersion = "1.2.0"
+const AgentVersion = "1.3.0"
 
 // Heartbeat is sent by the agent every few seconds.
 type Heartbeat struct {
@@ -114,6 +114,8 @@ type NodeSettings struct {
 	Congestion string `json:"congestion,omitempty"`
 	// ACME (cert_mode=acme, sing-box only): certificate for SNI, issued via HTTP-01 on port 80
 	ACMEEmail string `json:"acme_email,omitempty"`
+	// SharedPassword is the single password of a script node (core "script"); the agent never receives it.
+	SharedPassword string `json:"shared_password,omitempty"`
 	// Port hopping for QUIC protocols: UDP range redirected to Port, e.g. "20000-40000"
 	HopPorts string `json:"hop_ports,omitempty"`
 	// DNS-01 ACME (cert_mode=acme_dns, sing-box only). The token is injected by the master from its

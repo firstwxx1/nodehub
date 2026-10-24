@@ -140,7 +140,7 @@ func (s *Server) buildAgentConfig(srv *store.Server) (*proto.AgentConfig, error)
 	cfg := &proto.AgentConfig{Nodes: []proto.NodeConfig{}}
 	if srv.Enabled {
 		for _, n := range nodes {
-			if !n.Enabled {
+			if !n.Enabled || n.Core == "script" { // script nodes are run by their own installer, not by the agent's cores
 				continue
 			}
 			nc := proto.NodeConfig{ID: n.ID, Name: n.Name, Core: n.Core, Protocol: n.Protocol, Listen: n.Listen, Port: n.Port, Settings: n.Settings, Users: []proto.NodeUser{}}

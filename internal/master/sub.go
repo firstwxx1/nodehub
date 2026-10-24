@@ -186,7 +186,7 @@ func shareLink(sn subNode, u *store.User) string {
 	case "trojan":
 		addTransport()
 		addSecurity()
-		return "trojan://" + url.PathEscape(connPw(u)) + "@" + hostPort(sn.Addr, n.Port) + "?" + q.Encode() + frag
+		return "trojan://" + url.PathEscape(sn.pw(u)) + "@" + hostPort(sn.Addr, n.Port) + "?" + q.Encode() + frag
 	case "shadowsocks":
 		pw := ssPassword(n, u)
 		if util.SSKeyLen(st.Cipher) > 0 {
@@ -206,7 +206,7 @@ func shareLink(sn subNode, u *store.User) string {
 			q.Set("obfs", "salamander")
 			q.Set("obfs-password", st.ObfsPassword)
 		}
-		return "hysteria2://" + url.PathEscape(connPw(u)) + "@" + hostPort(sn.Addr, n.Port) + "?" + q.Encode() + frag
+		return "hysteria2://" + url.PathEscape(sn.pw(u)) + "@" + hostPort(sn.Addr, n.Port) + "?" + q.Encode() + frag
 	case "tuic":
 		q.Set("sni", st.SNI)
 		q.Set("alpn", "h3")
@@ -215,13 +215,13 @@ func shareLink(sn subNode, u *store.User) string {
 		if insecure(n) {
 			q.Set("allow_insecure", "1")
 		}
-		return "tuic://" + u.UUID + ":" + url.PathEscape(connPw(u)) + "@" + hostPort(sn.Addr, n.Port) + "?" + q.Encode() + frag
+		return "tuic://" + u.UUID + ":" + url.PathEscape(sn.pw(u)) + "@" + hostPort(sn.Addr, n.Port) + "?" + q.Encode() + frag
 	case "anytls":
 		q.Set("sni", st.SNI)
 		if insecure(n) {
 			q.Set("insecure", "1")
 		}
-		return "anytls://" + url.PathEscape(connPw(u)) + "@" + hostPort(sn.Addr, n.Port) + "?" + q.Encode() + frag
+		return "anytls://" + url.PathEscape(sn.pw(u)) + "@" + hostPort(sn.Addr, n.Port) + "?" + q.Encode() + frag
 	}
 	return ""
 }
@@ -308,7 +308,7 @@ func clashProxy(sn subNode, u *store.User) map[string]any {
 		security("servername")
 	case "trojan":
 		p["type"] = "trojan"
-		p["password"] = connPw(u)
+		p["password"] = sn.pw(u)
 		if !transport() {
 			return nil
 		}
@@ -320,7 +320,7 @@ func clashProxy(sn subNode, u *store.User) map[string]any {
 		p["password"] = ssPassword(n, u)
 	case "hysteria2":
 		p["type"] = "hysteria2"
-		p["password"] = connPw(u)
+		p["password"] = sn.pw(u)
 		if st.HopPorts != "" {
 			p["ports"] = st.HopPorts
 			p["hop-interval"] = 30
@@ -334,7 +334,7 @@ func clashProxy(sn subNode, u *store.User) map[string]any {
 	case "tuic":
 		p["type"] = "tuic"
 		p["uuid"] = u.UUID
-		p["password"] = connPw(u)
+		p["password"] = sn.pw(u)
 		p["sni"] = st.SNI
 		p["alpn"] = []string{"h3"}
 		p["congestion-controller"] = orStr(st.Congestion, "bbr")
@@ -342,7 +342,7 @@ func clashProxy(sn subNode, u *store.User) map[string]any {
 		p["skip-cert-verify"] = insecure(n)
 	case "anytls":
 		p["type"] = "anytls"
-		p["password"] = connPw(u)
+		p["password"] = sn.pw(u)
 		p["sni"] = st.SNI
 		p["skip-cert-verify"] = insecure(n)
 	default:
@@ -454,7 +454,7 @@ func singboxOutbound(sn subNode, u *store.User) map[string]any {
 		}
 		security()
 	case "trojan":
-		o["type"], o["password"] = "trojan", connPw(u)
+		o["type"], o["password"] = "trojan", sn.pw(u)
 		if !transport() {
 			return nil
 		}
@@ -462,7 +462,7 @@ func singboxOutbound(sn subNode, u *store.User) map[string]any {
 	case "shadowsocks":
 		o["type"], o["method"], o["password"] = "shadowsocks", st.Cipher, ssPassword(n, u)
 	case "hysteria2":
-		o["type"], o["password"] = "hysteria2", connPw(u)
+		o["type"], o["password"] = "hysteria2", sn.pw(u)
 		if st.HopPorts != "" {
 			o["server_ports"] = []string{strings.Replace(st.HopPorts, "-", ":", 1)}
 			o["hop_interval"] = "30s"
@@ -472,12 +472,12 @@ func singboxOutbound(sn subNode, u *store.User) map[string]any {
 			o["obfs"] = map[string]any{"type": "salamander", "password": st.ObfsPassword}
 		}
 	case "tuic":
-		o["type"], o["uuid"], o["password"] = "tuic", u.UUID, connPw(u)
+		o["type"], o["uuid"], o["password"] = "tuic", u.UUID, sn.pw(u)
 		o["congestion_control"] = orStr(st.Congestion, "bbr")
 		o["udp_relay_mode"] = "native"
 		o["tls"] = tls([]string{"h3"})
 	case "anytls":
-		o["type"], o["password"] = "anytls", connPw(u)
+		o["type"], o["password"] = "anytls", sn.pw(u)
 		o["tls"] = tls(nil)
 	default:
 		return nil
@@ -545,7 +545,7 @@ func surgeLine(sn subNode, u *store.User) string {
 		}
 		return s
 	case "trojan":
-		return base + fmt.Sprintf("trojan, %s, %d, password=%s, sni=%s", sn.Addr, n.Port, connPw(u), st.SNI) + ws() + skip
+		return base + fmt.Sprintf("trojan, %s, %d, password=%s, sni=%s", sn.Addr, n.Port, sn.pw(u), st.SNI) + ws() + skip
 	case "shadowsocks":
 		return base + fmt.Sprintf("ss, %s, %d, encrypt-method=%s, password=%s, udp-relay=true", sn.Addr, n.Port, st.Cipher, ssPassword(n, u))
 	case "hysteria2":
@@ -553,11 +553,11 @@ func surgeLine(sn subNode, u *store.User) string {
 		if st.HopPorts != "" {
 			hop = ", port-hopping=" + st.HopPorts + ", port-hopping-interval=30"
 		}
-		return base + fmt.Sprintf("hysteria2, %s, %d, password=%s, sni=%s", sn.Addr, n.Port, connPw(u), st.SNI) + hop + skip
+		return base + fmt.Sprintf("hysteria2, %s, %d, password=%s, sni=%s", sn.Addr, n.Port, sn.pw(u), st.SNI) + hop + skip
 	case "tuic":
-		return base + fmt.Sprintf("tuic-v5, %s, %d, uuid=%s, password=%s, sni=%s, alpn=h3", sn.Addr, n.Port, u.UUID, connPw(u), st.SNI) + skip
+		return base + fmt.Sprintf("tuic-v5, %s, %d, uuid=%s, password=%s, sni=%s, alpn=h3", sn.Addr, n.Port, u.UUID, sn.pw(u), st.SNI) + skip
 	case "anytls":
-		return base + fmt.Sprintf("anytls, %s, %d, password=%s, sni=%s", sn.Addr, n.Port, connPw(u), st.SNI) + skip
+		return base + fmt.Sprintf("anytls, %s, %d, password=%s, sni=%s", sn.Addr, n.Port, sn.pw(u), st.SNI) + skip
 	}
 	return "" // vless is not supported by Surge
 }
@@ -673,4 +673,13 @@ func (s *Server) handleSubInfo(w http.ResponseWriter, r *http.Request) {
 	v := s.viewUser(r, u)
 	ok(w, map[string]any{"status": u.Status, "upload": u.Up, "download": u.Down, "total": u.TrafficLimit, "expire": u.ExpireAt,
 		"remaining": v.Remaining, "expire_days": v.ExpireDays, "nodes": list, "updated_at": time.Now().Unix()})
+}
+
+// pw is the credential written into the subscription: script nodes (hysteria2-installer) authenticate every
+// client with the owner password of that script, other nodes use the user's own password.
+func (sn subNode) pw(u *store.User) string {
+	if sn.Node.Core == "script" && sn.Node.Settings.SharedPassword != "" {
+		return sn.Node.Settings.SharedPassword
+	}
+	return connPw(u)
 }

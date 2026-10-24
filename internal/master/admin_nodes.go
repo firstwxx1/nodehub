@@ -19,7 +19,7 @@ var protocolCores = map[string][]string{
 	"vmess":       {"xray", "singbox"},
 	"trojan":      {"xray", "singbox"},
 	"shadowsocks": {"xray", "singbox"},
-	"hysteria2":   {"singbox"},
+	"hysteria2":   {"singbox", "script"},
 	"tuic":        {"singbox"},
 	"anytls":      {"singbox"},
 }
@@ -154,13 +154,13 @@ func (s *Server) normalizeNode(n *store.Node) error {
 	}
 	st.ACMEDNSProvider, st.ACMEDNSToken = "", "" // injected from settings when the agent config is built
 	if st.CertMode == "acme" || st.CertMode == "acme_dns" {
-		if n.Core != "singbox" {
+		if n.Core != "singbox" && n.Core != "script" {
 			return fmt.Errorf("ACME 自动证书目前只支持 sing-box 内核的节点")
 		}
 		if st.SNI == "" || net.ParseIP(st.SNI) != nil || !strings.Contains(st.SNI, ".") {
 			return fmt.Errorf("ACME 证书需要把 SNI 填成你的域名")
 		}
-		if st.CertMode == "acme_dns" && s.st.Setting("cf_api_token") == "" {
+		if st.CertMode == "acme_dns" && n.Core != "script" && s.st.Setting("cf_api_token") == "" {
 			return fmt.Errorf("DNS 验证需要先在「设置」里填写 Cloudflare API 令牌")
 		}
 	}
@@ -367,6 +367,12 @@ func (s *Server) handleUpdateNode(w http.ResponseWriter, r *http.Request, a *sto
 
 func (s *Server) handleDeleteNode(w http.ResponseWriter, r *http.Request, a *store.Admin) {
 	id := pathID(r)
+	if n, err := s.st.GetNode(id); err == nil && n.Core == "script" && r.URL.Query().Get("uninstall") == "1" {
+		if _, err := s.st.QueueCommand(n.ServerID, "uninstall_hy2", s.st.Setting("installer_url")); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+	}
 	if err := s.st.DeleteNode(id); err != nil {
 		writeErr(w, 500, err.Error())
 		return

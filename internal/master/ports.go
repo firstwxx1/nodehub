@@ -100,6 +100,9 @@ func (s *Server) suggestPort(serverID int64, transports []string, from int, self
 
 // checkNodePorts rejects a node whose port (or ACME's port 80) is held by another program on the VPS.
 func (s *Server) checkNodePorts(n *store.Node, old *store.Node) error {
+	if n.Core == "script" {
+		return nil // the installer owns its ports
+	}
 	snap, known := s.ports.get(n.ServerID)
 	if !known || !n.Enabled {
 		return nil

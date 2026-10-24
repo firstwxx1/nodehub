@@ -50,7 +50,8 @@ type ImportScan struct {
 	DownMbps     int          `json:"down_mbps"`
 	HopPorts     string       `json:"hop_ports"`
 	Insecure     bool         `json:"insecure"`
-	AuthMode     string       `json:"auth_mode"` // http (portal users) | password (single user)
+	AuthMode     string       `json:"auth_mode"`     // http (portal users) | password (single user)
+	AuthPassword string       `json:"auth_password"` // owner password from client_meta.json
 	Users        []ImportUser `json:"users"`
 	Version      string       `json:"version"`
 	Running      []string     `json:"running"`
@@ -159,6 +160,7 @@ func ScanHysteria2Installer() (*ImportScan, error) {
 	}
 
 	s.AuthMode = c.Auth.Type
+	s.AuthPassword = meta.AuthPassword
 	if c.Auth.Type == "password" {
 		pw := c.Auth.Password
 		if pw == "" {

@@ -681,6 +681,20 @@ func (a *Agent) runCommand(c proto.Command) {
 			out += "\n" + err.Error()
 		}
 		res.Output = out
+	case "install_hy2":
+		out, err := InstallHy2(c.Arg)
+		if err != nil {
+			res.OK, res.Output = false, err.Error()
+		} else {
+			res.Output = out
+		}
+	case "uninstall_hy2":
+		out, err := UninstallHy2(c.Arg)
+		res.Output = out
+		if err != nil {
+			res.OK = false
+			res.Output += "\n" + err.Error()
+		}
 	case "upgrade_agent":
 		if err := a.upgradeSelf(); err != nil {
 			res.OK, res.Output = false, err.Error()

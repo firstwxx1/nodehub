@@ -380,7 +380,7 @@ var editableSettings = map[string]bool{
 	"traffic_retention_days": true, "agent_insecure_tls": true,
 	"ipcheck_ipqs_key": true, "ipcheck_ipinfo_token": true, "ipcheck_ipapiis_key": true, "ipcheck_scamalytics_url": true,
 	"ipcheck_scamalytics_key": true, "ipcheck_abuseipdb_key": true,
-	"cf_api_token": true, "tg_bot_token": true, "tg_chat_id": true, "notify_events": true, "server_expire_remind_days": true,
+	"cf_api_token": true, "installer_url": true, "tg_bot_token": true, "tg_chat_id": true, "notify_events": true, "server_expire_remind_days": true,
 }
 
 var secretSettings = map[string]bool{"ipcheck_ipqs_key": true, "ipcheck_ipinfo_token": true, "ipcheck_ipapiis_key": true,

@@ -346,3 +346,48 @@ func TestUniqueNames(t *testing.T) {
 		t.Fatalf("unexpected names %v", got)
 	}
 }
+
+func TestScriptNode(t *testing.T) {
+	s, err := New(Options{DataDir: t.TempDir(), AdminPass: "test-pass-123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sid, _ := s.st.CreateServer(&store.Server{Name: "AWS-US", Host: "13.58.3.202", PublicIPv4: "13.58.3.202", Enabled: true, TrafficResetDay: 1}, util.SHA256Hex(util.RandToken(24)))
+	cid, _ := s.st.QueueCommand(sid, "install_hy2", "{}")
+	res := `{"scan":{"kind":"hysteria2-installer","port":16305,"domain":"13.58.3.202","cert_mode":"file","insecure":true,"obfs_password":"obfspw","hop_ports":"20000-40000","auth_password":"ownerpw","up_mbps":1000,"down_mbps":1000,"version":"v2.6"},"log":"ok"}`
+	s.st.FinishCommand(sid, proto.CommandResult{ID: cid, OK: true, Output: res})
+
+	body, _ := json.Marshal(map[string]any{"command_id": cid})
+	req := httptest.NewRequest("POST", "/api/servers/1/script-node/finish", bytes.NewReader(body))
+	req.SetPathValue("id", "1")
+	w := httptest.NewRecorder()
+	s.handleScriptNodeFinish(w, req, nil)
+	if w.Code != 200 {
+		t.Fatalf("finish: %d %s", w.Code, w.Body.String())
+	}
+	// a second one must be refused
+	req2 := httptest.NewRequest("POST", "/api/servers/1/script-node/finish", bytes.NewReader(body))
+	req2.SetPathValue("id", "1")
+	w2 := httptest.NewRecorder()
+	s.handleScriptNodeFinish(w2, req2, nil)
+	if w2.Code == 200 {
+		t.Fatal("second finish should be refused")
+	}
+
+	srv, _ := s.st.GetServer(sid)
+	cfg, err := s.buildAgentConfig(srv)
+	if err != nil || len(cfg.Nodes) != 0 {
+		t.Fatalf("agent must not run script nodes: %v %+v", err, cfg)
+	}
+	nodes, _ := s.st.NodesByServer(sid)
+	if len(nodes) != 1 || nodes[0].Core != "script" || nodes[0].Settings.CertMode != "self" {
+		t.Fatalf("node: %+v", nodes)
+	}
+	u := &store.User{Username: "u", Password: "userpw", UUID: "uuid-1"}
+	link := shareLink(subNode{Node: nodes[0], Name: "x", Addr: "13.58.3.202"}, u)
+	for _, want := range []string{"hysteria2://ownerpw@13.58.3.202:16305", "obfs=salamander", "obfs-password=obfspw", "mport=20000-40000", "insecure=1"} {
+		if !strings.Contains(link, want) {
+			t.Errorf("link %q lacks %q", link, want)
+		}
+	}
+}

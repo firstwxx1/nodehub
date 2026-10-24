@@ -419,6 +419,37 @@ async function importFlow(serverId, reload) {
   });
 }
 
+
+// attach a node that the hysteria2-installer script already runs, without touching the server
+async function adoptFlow(serverId, reload) {
+  const { command_id } = await api('POST', `/api/servers/${serverId}/import/scan`);
+  const m = modal('接入原版脚本节点', '<div class="muted">正在让 Agent 读取这台服务器上脚本的配置（约 10 秒）…</div>', { cancelText: '关闭' });
+  let res;
+  for (let i = 0; i < 40; i++) {
+    await new Promise((r) => setTimeout(r, 1500));
+    if (!document.body.contains(m.el)) return;
+    res = await api('GET', `/api/servers/${serverId}/import/preview?command_id=${command_id}`);
+    if (res.status === 'done' || res.status === 'failed') break;
+  }
+  m.close();
+  if (!res || res.status !== 'done') return modal('没有找到', `<p style="margin-top:0"><b>${esc((res && res.error) || '扫描超时，请确认 Agent 在线')}</b></p>`, { cancelText: '知道了' });
+  const sc = res.scan;
+  modal('确认接入', `<div class="note info" style="margin-bottom:12px">只把节点信息读进面板用于生成订阅，<b>不会停用、也不会修改服务器上的脚本和 Hysteria 服务</b>。订阅里所有用户共用脚本的主密码。</div>
+    <div class="grid g2" style="font-size:13px;margin-bottom:12px">
+      <div><span class="muted">端口</span><div class="mono">${sc.port}</div></div>
+      <div><span class="muted">证书</span><div>${esc({ acme: 'ACME 自动证书', file: '证书文件', self: '自签' }[sc.cert_mode] || sc.cert_mode)} ${esc(sc.domain || '')}</div></div>
+      <div><span class="muted">混淆</span><div>${sc.obfs ? 'salamander' : '无'}</div></div>
+      <div><span class="muted">端口跳跃</span><div>${esc(sc.hop_ports || '无')}</div></div></div>
+    <div class="form">${inp('节点名称', 'name', '', { ph: '默认：服务器名 Hysteria2' })}${inp('分组', 'groups', '', { ph: '留空 = 所有用户可用' })}</div>`, {
+    okText: '接入',
+    ok: async (mm) => {
+      const f = readForm(mm);
+      const r = await api('POST', `/api/servers/${serverId}/script-node/adopt`, { command_id, ...f });
+      toast('已接入：节点 #' + r.node_id); reload && reload();
+    },
+  });
+}
+
 PAGES.servers = async (el) => {
   const load = async () => {
     const list = await api('GET', '/api/servers');
@@ -444,7 +475,7 @@ PAGES.servers = async (el) => {
           <small title="${esc(s.apply_error)}" class="${cfgOk ? '' : 'bad-t'}">${s.last_seen ? (cfgOk ? '配置已同步 ' + esc((s.applied_version || '').slice(0, 6)) : '⚠ ' + esc((s.apply_error || '').slice(0, 40))) : ''}</small>
           <small>${st.core_versions ? Object.entries(st.core_versions).filter(([, v]) => v).map(([k, v]) => `${k === 'singbox' ? 'sing-box' : k} ${esc(v)}${st.core_running && st.core_running[k] ? '' : ' (停)'}`).join(' · ') : ''}</small></div></td>
         <td>${unlockPills(s.unlock)}</td>
-        <td>${menu([['edit', '编辑'], ['detail', '详情与命令记录'], ['import', '导入现有节点'], ['token', '重置令牌 / 安装命令'], ['cmd:restart_core', '重启内核'], ['cmd:reload', '重新下发配置'], ['cmd:unlock_test', '解锁检测'], ['cmd:upgrade_agent', '升级 Agent'], ['resetTraffic', '重置本期流量'], ['del', '删除', 'danger']])}</td>
+        <td>${menu([['edit', '编辑'], ['detail', '详情与命令记录'], ['adopt', '接入原版脚本节点'], ['import', '导入现有节点（由 NodeHub 接管）'], ['token', '重置令牌 / 安装命令'], ['cmd:restart_core', '重启内核'], ['cmd:reload', '重新下发配置'], ['cmd:unlock_test', '解锁检测'], ['cmd:upgrade_agent', '升级 Agent'], ['resetTraffic', '重置本期流量'], ['del', '删除', 'danger']])}</td>
       </tr>`;
     }).join('')}</tbody></table></div>`;
   };
@@ -461,6 +492,7 @@ PAGES.servers = async (el) => {
     resetTraffic: (id) => confirmBox('将本期流量统计清零？', async () => { await api('POST', `/api/servers/${id}/reset-traffic`); load(); }),
     del: (id) => confirmBox('删除服务器会同时删除其上所有节点，且无法恢复。确定删除？', async () => { await api('DELETE', '/api/servers/' + id); toast('已删除'); load(); }, '删除'),
     import: (id) => importFlow(id, load),
+    adopt: (id) => adoptFlow(id, load),
     detail: async (id) => {
       const [{ server: s, nodes }, cmds] = await Promise.all([api('GET', '/api/servers/' + id), api('GET', `/api/servers/${id}/commands`)]);
       const st = s.status || {};
@@ -626,6 +658,82 @@ function ipSummary(c) {
   return `<div class="row wrap" style="gap:4px">${c.native ? `<span class="pill ok">原生·${esc(cn(c.geo_country))}</span>` : `<span class="pill warn">广播</span>`}${risks.length ? `<span class="pill bad">${risks.join('/')}</span>` : ''}<span class="score ${c.fraud_score >= 70 ? 'hi' : c.fraud_score >= 30 ? 'mid' : 'lo'}">${c.fraud_score}</span></div>`;
 }
 
+
+// ---------- script nodes: run the hysteria2-installer script on a VPS ----------
+async function scriptFlow(servers, reload) {
+  const online = servers.filter((s) => s.online);
+  if (!online.length) return toast('没有在线的服务器，请先让 Agent 连上面板', true);
+  const body = `<div class="note info" style="margin-bottom:12px">在所选服务器上以 root 运行你的 <b>hysteria2-installer</b> 原版脚本（免交互），装好后自动收进面板，由脚本自己的 Hysteria 服务运行，NodeHub 不再起内核。每台服务器装一份。</div>
+    <div class="form">
+    ${inp('服务器', 'server_id', online[0].id, { opts: online.map((s) => [s.id, s.name + (s.public_ipv4 ? ' · ' + s.public_ipv4 : '')]), dtype: 'int', full: true })}
+    ${inp('节点名称', 'name', '', { ph: '默认：服务器名 Hysteria2' })}
+    ${inp('分组', 'groups', '', { ph: '留空 = 所有用户可用' })}
+    ${inp('端口（UDP）', 'port', '', { dtype: 'int', ph: '留空自动选一个空闲端口' })}
+    ${inp('证书', 'cert_type', '1', { opts: [['1', '自签名（无需域名，客户端跳过证书校验）'], ['3', '域名证书（Let\'s Encrypt 自动申请）']], dtype: 'int' })}
+    ${inp('域名', 'domain', '', { ph: '仅域名证书需要，例如 hy2.example.com', hint: '域名必须已解析到这台服务器，且安全组放行 TCP 80' })}
+    ${inp('证书邮箱', 'email', '', { ph: '可选' })}
+    </div>`;
+  modal('添加节点（原版脚本 Hysteria2）', body, {
+    wide: true, okText: '开始安装',
+    ok: async (mm) => {
+      const f = readForm(mm);
+      if (f.cert_type === 3 && !f.domain) throw new Error('选择域名证书时必须填写域名');
+      const r = await api('POST', `/api/servers/${f.server_id}/script-node`, { port: f.port || 0, cert_type: f.cert_type, domain: f.domain, email: f.email });
+      scriptProgress(f.server_id, r.command_id, r.port, f, reload);
+    },
+  });
+}
+function scriptProgress(serverId, cmdId, port, f, reload) {
+  const m = modal('正在安装…', `<div class="muted" id="spMsg">已下发给 Agent，正在下载并运行脚本，通常 1–3 分钟（域名证书可能更久）。可以关闭这个窗口，安装会继续在服务器上进行。</div>
+    <pre class="codebox mt" id="spLog" style="display:none;max-height:260px;overflow:auto;white-space:pre-wrap"></pre>`, { cancelText: '关闭' });
+  (async () => {
+    for (let i = 0; i < 300; i++) {
+      await new Promise((r) => setTimeout(r, 4000));
+      if (!document.body.contains(m.el)) return;
+      let list;
+      try { list = await api('GET', `/api/servers/${serverId}/commands`); } catch (e) { continue; }
+      const c = (list || []).find((x) => x.id === cmdId);
+      if (!c || c.status === 'pending' || c.status === 'sent') continue;
+      if (c.status === 'failed') {
+        $('#spMsg', m.el).innerHTML = '<b class="bad-t">安装失败</b>';
+        const l = $('#spLog', m.el); l.style.display = ''; l.textContent = c.output || '';
+        return;
+      }
+      try {
+        const r = await api('POST', `/api/servers/${serverId}/script-node/finish`, { command_id: cmdId, name: f.name, groups: f.groups });
+        m.close(); reload && reload();
+        modal('节点已创建', `<p style="margin-top:0">脚本已装好，节点 #${r.node_id} 已加入面板。</p>
+          <div class="note">请在云厂商的<b>安全组 / 防火墙</b>放行：<br>· UDP ${port}（主端口）<br>· UDP 20000-40000（端口跳跃，不放行就把节点里的「端口跳跃」清空）<br>${f.cert_type === 3 ? '· TCP 80（证书续期）<br>' : ''}</div>`, { cancelText: '知道了' });
+      } catch (e) { $('#spMsg', m.el).innerHTML = '<b class="bad-t">脚本已装好，但收进面板失败：</b>' + esc(e.message || String(e)); }
+      return;
+    }
+    if (document.body.contains(m.el)) $('#spMsg', m.el).textContent = '等待超时。请到「服务器 → 详情与命令记录」查看 install_hy2 的结果。';
+  })();
+}
+async function scriptEdit(n, reload) {
+  modal('编辑节点（原版脚本）', `<div class="form">${inp('节点名称', 'name', n.name)}${inp('分组', 'groups', n.groups || '')}
+    ${inp('倍率', 'rate', n.rate, { dtype: 'float' })}
+    ${inp('端口跳跃', 'hop_ports', n.settings.hop_ports || '', { ph: '例如 20000-40000，清空 = 订阅里不带跳跃', hint: '只影响订阅内容；服务器上的跳跃规则由脚本管理' })}
+    ${inp('伪装 / 带宽等', 'info', `端口 ${n.port}/UDP · 证书 ${n.settings.cert_mode} · SNI ${n.settings.sni}`, { attrs: 'disabled', full: true })}</div>
+    <p class="muted" style="font-size:12px;margin-bottom:0">端口、证书、密码由原版脚本管理。要改它们，请登录服务器运行脚本菜单（<code>bash install.sh</code>），改完在服务器页面「导入现有节点」重新扫描。</p>`, {
+    ok: async (mm) => {
+      const f = readForm(mm);
+      n.name = f.name; n.groups = f.groups; n.rate = f.rate || 1; n.settings.hop_ports = f.hop_ports;
+      await api('PUT', '/api/nodes/' + n.id, n); toast('已保存'); reload && reload();
+    },
+  });
+}
+function scriptDelete(id, reload) {
+  const m = modal('删除脚本节点', `<p style="margin-top:0">选择删除方式：</p>
+    <div class="btns" style="flex-direction:column;align-items:stretch;gap:8px">
+      <button class="btn" data-d="keep">只从面板删除（服务器上的 Hysteria 继续运行）</button>
+      <button class="btn danger" data-d="un">同时在服务器上卸载（运行脚本的卸载功能，节点会失效）</button></div>`, { cancelText: '取消' });
+  m.el.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-d]'); if (!b) return;
+    try { await api('DELETE', '/api/nodes/' + id + (b.dataset.d === 'un' ? '?uninstall=1' : '')); toast('已删除'); m.close(); reload && reload(); } catch (err) { fail(err); }
+  });
+}
+
 PAGES.nodes = async (el) => {
   let servers = [], panels = [];
   const filter = { q: store.get('nodes_q', '') };
@@ -635,13 +743,13 @@ PAGES.nodes = async (el) => {
     const q = filter.q.toLowerCase();
     const rows = list.filter((n) => !q || [n.name, n.server_name, n.protocol, n.connect_addr, String(n.port), n.groups].join(' ').toLowerCase().includes(q));
     el.innerHTML = topbar('节点', `${list.filter((n) => n.enabled && n.server_online).length} / ${list.length} 运行中`,
-      `<input class="inp search" id="nq" placeholder="搜索名称 / 服务器 / 端口" value="${esc(filter.q)}"><button class="btn primary" data-act="add">${icon('plus')}添加节点</button>`) +
+      `<input class="inp search" id="nq" placeholder="搜索名称 / 服务器 / 端口" value="${esc(filter.q)}"><button class="btn" data-act="addAdv">高级节点</button><button class="btn primary" data-act="add">${icon('plus')}添加节点</button>`) +
       (!list.length ? `<div class="card empty">${servers.length ? '还没有节点，点击「添加节点」。' : '请先在「服务器」页面添加一台服务器。'}</div>` :
       `<div class="card tbl-wrap"><table class="tbl"><thead><tr><th>节点</th><th>服务器</th><th>协议</th><th>地址</th><th>用户</th><th>在线</th><th>累计流量</th><th>IP 质量</th><th>状态</th><th></th></tr></thead><tbody>
       ${rows.map((n) => `<tr data-id="${n.id}">
         <td><div class="cell-2"><b>${esc(n.name)}</b><small>${n.source === 'panel' ? `面板 · ${esc(n.panel_name || '')} #${n.panel_node_id}` : `本地${n.groups ? ' · ' + esc(n.groups) : ''}${n.rate !== 1 ? ' · ×' + n.rate : ''}`}</small></div></td>
         <td><span class="row"><span class="dot ${n.server_online ? 'on' : 'off'}"></span>${esc(n.server_name)}</span></td>
-        <td><div class="cell-2"><span>${esc(protoLabel(n))}</span><small>${n.core === 'singbox' ? 'sing-box' : 'Xray'}</small></div></td>
+        <td><div class="cell-2"><span>${esc(protoLabel(n))}</span><small>${n.core === 'singbox' ? 'sing-box' : n.core === 'script' ? '原版脚本' : 'Xray'}</small></div></td>
         <td class="mono">${esc(n.connect_addr)}:${n.port}</td>
         <td class="num">${n.user_count}</td>
         <td class="num">${n.online_users}</td>
@@ -673,10 +781,14 @@ PAGES.nodes = async (el) => {
   bind(el, {
     add: () => {
       if (!servers.length) return toast('请先添加服务器', true);
-      const m = modal('添加节点', nodeForm({ server_id: servers[0].id }, servers, panels), { ok: save(null), wide: true, okText: '创建' });
+      scriptFlow(servers, load);
+    },
+    addAdv: () => {
+      if (!servers.length) return toast('请先添加服务器', true);
+      const m = modal('添加节点（NodeHub 内核：Xray / sing-box）', nodeForm({ server_id: servers[0].id }, servers, panels), { ok: save(null), wide: true, okText: '创建' });
       wireNodeForm(m.el, 0, true);
     },
-    edit: async (id) => { const n = await api('GET', '/api/nodes/' + id); const m = modal('编辑节点', nodeForm(n, servers, panels), { ok: save(id), wide: true }); wireNodeForm(m.el, id, false); },
+    edit: async (id) => { const n = await api('GET', '/api/nodes/' + id); if (n.core === 'script') return scriptEdit(n, load); const m = modal('编辑节点', nodeForm(n, servers, panels), { ok: save(id), wide: true }); wireNodeForm(m.el, id, false); },
     info: (id) => shareModal(find(id)),
     toggle: async (id) => { await api('POST', `/api/nodes/${id}/toggle`); load(); },
     copyNode: async (id) => { const r = await api('POST', `/api/nodes/${id}/copy`, {}); toast(`已复制为「${r.name}」（端口 ${r.port}，默认停用）`); load(); },
@@ -686,7 +798,7 @@ PAGES.nodes = async (el) => {
       const list = await api('GET', `/api/nodes/${id}/online`);
       modal('在线 IP（5 分钟内）', list.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>用户标识</th><th>IP</th><th>最后活跃</th></tr></thead><tbody>${list.map((o) => `<tr><td class="mono">${esc(o.user_key)}</td><td class="mono">${o.ip === '-' ? '<span class="faint">sing-box 不提供 IP</span>' : esc(o.ip)}</td><td>${ago(o.last_seen)}</td></tr>`).join('')}</tbody></table></div>` : '<div class="faint">暂无在线用户</div>', { cancelText: '关闭' });
     },
-    del: (id) => confirmBox('确定删除该节点？', async () => { await api('DELETE', '/api/nodes/' + id); toast('已删除'); load(); }, '删除'),
+    del: (id) => { const n = find(id); if (n && n.core === 'script') return scriptDelete(id, load); confirmBox('确定删除该节点？', async () => { await api('DELETE', '/api/nodes/' + id); toast('已删除'); load(); }, '删除'); },
   });
   await load();
   autoRefresh(load, 15000);
