@@ -177,7 +177,7 @@ func xrayInbound(n proto.NodeConfig, opt RenderOptions) (map[string]any, error) 
 		if n.Protocol != "vless" && n.Protocol != "trojan" {
 			return nil, fmt.Errorf("reality 只支持 vless/trojan")
 		}
-		dest := orDefault(s.RealityDest, "www.microsoft.com:443")
+		dest := orDefault(s.RealityDest, "www.cloudflare.com:443")
 		if _, _, err := net.SplitHostPort(dest); err != nil {
 			dest += ":443"
 		}
@@ -380,7 +380,7 @@ func singboxInbound(n proto.NodeConfig, opt RenderOptions) (map[string]any, erro
 	case "tls":
 		ib["tls"] = singboxTLS(n, opt, nil)
 	case "reality":
-		dest := orDefault(s.RealityDest, "www.microsoft.com:443")
+		dest := orDefault(s.RealityDest, "www.cloudflare.com:443")
 		host, port, err := net.SplitHostPort(dest)
 		if err != nil {
 			host, port = dest, "443"

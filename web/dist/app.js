@@ -512,7 +512,7 @@ function nodeForm(n, servers, panels) {
     ${inp('Host', 'settings.host', s.host, { when: 'proto:vless,vmess,trojan;net:ws,xhttp,httpupgrade' })}
     ${inp('gRPC ServiceName', 'settings.service_name', s.service_name, { when: 'proto:vless,vmess,trojan;net:grpc' })}
 
-    ${inp('REALITY 目标 (dest)', 'settings.reality_dest', s.reality_dest || 'www.microsoft.com:443', { when: 'sec:reality;proto:vless,trojan', hint: '被偷证书的网站，需支持 TLS1.3 + H2' })}
+    ${inp('REALITY 目标 (dest)', 'settings.reality_dest', s.reality_dest || 'www.cloudflare.com:443', { when: 'sec:reality;proto:vless,trojan', hint: '被借用证书的网站，需支持 TLS1.3 + H2。<b>不要用 www.microsoft.com</b>（在 AWS 上握手失败，连接会被断开），推荐 www.cloudflare.com 或 www.apple.com' })}
     ${inp('REALITY serverNames', 'settings.reality_server_name', s.reality_server_name, { when: 'sec:reality;proto:vless,trojan', ph: '默认取 dest 的域名' })}
     ${inp('REALITY 私钥', 'settings.reality_private_key', s.reality_private_key, { when: 'sec:reality;proto:vless,trojan', ph: '留空自动生成', full: true })}
     ${inp('REALITY 公钥', 'settings.reality_public_key', s.reality_public_key, { when: 'sec:reality;proto:vless,trojan', attrs: 'readonly', ph: '保存后自动计算' })}

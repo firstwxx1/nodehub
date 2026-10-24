@@ -105,7 +105,7 @@ func (s *Server) normalizeNode(n *store.Node) error {
 				st.RealityShortID = util.RandHex(4)
 			}
 			if st.RealityDest == "" {
-				st.RealityDest = "www.microsoft.com:443"
+				st.RealityDest = "www.cloudflare.com:443"
 			}
 			if st.RealityServerName == "" {
 				st.RealityServerName = strings.Split(st.RealityDest, ":")[0]
