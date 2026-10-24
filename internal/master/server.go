@@ -50,6 +50,7 @@ type Server struct {
 	loginFails  map[string][]time.Time
 	ipcheckBusy atomic.Bool
 	notifyQ     chan notifyJob
+	ports       portBook
 }
 
 type verEntry struct {
@@ -207,6 +208,7 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /api/servers/{id}", s.admin(s.handleGetServer))
 	m.HandleFunc("PUT /api/servers/{id}", s.admin(s.handleUpdateServer))
 	m.HandleFunc("DELETE /api/servers/{id}", s.admin(s.handleDeleteServer))
+	m.HandleFunc("GET /api/servers/{id}/ports", s.admin(s.handleServerPorts))
 	m.HandleFunc("POST /api/servers/{id}/token", s.admin(s.handleResetServerToken))
 	m.HandleFunc("POST /api/servers/{id}/command", s.admin(s.handleServerCommand))
 	m.HandleFunc("GET /api/servers/{id}/commands", s.admin(s.handleServerCommands))

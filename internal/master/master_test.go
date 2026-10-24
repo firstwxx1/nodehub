@@ -184,3 +184,86 @@ func TestOpenAPIAndAgentFlow(t *testing.T) {
 		t.Fatalf("sub: %s\n%s", resp.Header.Get("Subscription-Userinfo"), body)
 	}
 }
+
+func TestPortCheckAndDNSCert(t *testing.T) {
+	s, err := New(Options{DataDir: t.TempDir(), AdminPass: "test-pass-123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentTok := util.RandToken(24)
+	sid, _ := s.st.CreateServer(&store.Server{Name: "s1", Enabled: true, TrafficResetDay: 1}, util.SHA256Hex(agentTok))
+
+	hy := &store.Node{ServerID: sid, Name: "hy", Protocol: "hysteria2", Port: 8443, Enabled: true}
+	if err := s.normalizeNode(hy); err != nil {
+		t.Fatal(err)
+	}
+	// no report yet: unknown, never blocks
+	if err := s.checkNodePorts(hy, nil); err != nil {
+		t.Fatalf("unknown host must not block: %v", err)
+	}
+	s.ports.set(sid, []proto.ListenPort{{Proto: "tcp", Port: 8443, Proc: "xray"}, {Proto: "udp", Port: 8444, Proc: "x"}, {Proto: "tcp", Port: 80, Proc: "nginx"}})
+	// hysteria2 is UDP: TCP 8443 does not clash
+	if err := s.checkNodePorts(hy, nil); err != nil {
+		t.Fatalf("tcp 8443 must not block a udp node: %v", err)
+	}
+	vl := &store.Node{ServerID: sid, Name: "vl", Protocol: "vless", Port: 8443, Enabled: true}
+	err = s.checkNodePorts(vl, nil)
+	if err == nil || !strings.Contains(err.Error(), "xray") || !strings.Contains(err.Error(), "8444") {
+		t.Fatalf("expected conflict naming xray and suggesting 8444, got %v", err)
+	}
+	// editing an existing node without moving its port is allowed
+	if err := s.checkNodePorts(vl, &store.Node{Port: 8443, Protocol: "vless"}); err != nil {
+		t.Fatalf("unchanged port must pass: %v", err)
+	}
+	// ACME over HTTP needs port 80
+	ac := &store.Node{ServerID: sid, Name: "ac", Protocol: "hysteria2", Port: 9443, Enabled: true, Settings: proto.NodeSettings{CertMode: "acme"}}
+	if err := s.checkNodePorts(ac, nil); err == nil || !strings.Contains(err.Error(), "nginx") {
+		t.Fatalf("expected port 80 conflict, got %v", err)
+	}
+	// DNS mode needs the Cloudflare token first, then is injected into the agent config only
+	dn := &store.Node{ServerID: sid, Name: "dn", Protocol: "hysteria2", Port: 9443, Enabled: true, Settings: proto.NodeSettings{CertMode: "acme_dns", SNI: "us.example.com"}}
+	if err := s.normalizeNode(dn); err == nil {
+		t.Fatal("expected error without cloudflare token")
+	}
+	_ = s.st.SetSetting("cf_api_token", "cf-secret")
+	if err := s.normalizeNode(dn); err != nil {
+		t.Fatal(err)
+	}
+	dn.Settings.ACMEDNSToken = "client-supplied" // must be stripped
+	if err := s.normalizeNode(dn); err != nil || dn.Settings.ACMEDNSToken != "" {
+		t.Fatalf("token must not be stored on the node: %v %q", err, dn.Settings.ACMEDNSToken)
+	}
+	if _, err := s.st.CreateNode(dn); err != nil {
+		t.Fatal(err)
+	}
+	srv, _ := s.st.GetServer(sid)
+	cfg, err := s.buildAgentConfig(srv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got string
+	for _, n := range cfg.Nodes {
+		if n.Name == "dn" {
+			got = n.Settings.ACMEDNSToken
+		}
+	}
+	if got != "cf-secret" {
+		t.Fatalf("agent config must carry the token, got %q", got)
+	}
+}
+
+func TestDefaultPortSkipsBusy(t *testing.T) {
+	s, err := New(Options{DataDir: t.TempDir(), AdminPass: "test-pass-123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sid, _ := s.st.CreateServer(&store.Server{Name: "s1", Enabled: true, TrafficResetDay: 1}, util.SHA256Hex(util.RandToken(24)))
+	s.ports.set(sid, []proto.ListenPort{{Proto: "udp", Port: 443, Proc: "nginx"}, {Proto: "tcp", Port: 443, Proc: "nginx"}})
+	if got := s.defaultPort(sid, []string{"udp"}, 0); got != 8443 {
+		t.Fatalf("want 8443, got %d", got)
+	}
+	s.ports.set(sid, []proto.ListenPort{{Proto: "tcp", Port: 443, Proc: "nginx"}})
+	if got := s.defaultPort(sid, []string{"udp"}, 0); got != 443 { // udp 443 is free when only tcp is held
+		t.Fatalf("want 443, got %d", got)
+	}
+}

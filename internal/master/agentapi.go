@@ -45,6 +45,10 @@ func (s *Server) agentHeartbeat(w http.ResponseWriter, r *http.Request, srv *sto
 	if hb.PublicIPv4 == "" {
 		hb.PublicIPv4 = clientIP(r)
 	}
+	if hb.AgentVersion != "" && hb.Ports != nil {
+		s.ports.set(srv.ID, hb.Ports)
+	}
+	hb.Ports = nil // not persisted in status_json
 	wasOnline := srv.Online
 	if err := s.st.UpdateServerHeartbeat(srv.ID, &hb); err != nil {
 		writeErr(w, 500, err.Error())
@@ -140,6 +144,9 @@ func (s *Server) buildAgentConfig(srv *store.Server) (*proto.AgentConfig, error)
 				continue
 			}
 			nc := proto.NodeConfig{ID: n.ID, Name: n.Name, Core: n.Core, Protocol: n.Protocol, Listen: n.Listen, Port: n.Port, Settings: n.Settings, Users: []proto.NodeUser{}}
+			if nc.Settings.CertMode == "acme_dns" {
+				nc.Settings.ACMEDNSProvider, nc.Settings.ACMEDNSToken = "cloudflare", s.st.Setting("cf_api_token")
+			}
 			if n.Source == "panel" {
 				pus, err := s.st.PanelUsers(n.ID)
 				if err != nil {

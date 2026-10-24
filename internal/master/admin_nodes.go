@@ -139,12 +139,16 @@ func (s *Server) normalizeNode(n *store.Node) error {
 	if (st.Security == "tls" || n.Protocol == "hysteria2" || n.Protocol == "tuic" || n.Protocol == "anytls") && st.CertMode == "" {
 		st.CertMode = "self"
 	}
-	if st.CertMode == "acme" {
+	st.ACMEDNSProvider, st.ACMEDNSToken = "", "" // injected from settings when the agent config is built
+	if st.CertMode == "acme" || st.CertMode == "acme_dns" {
 		if n.Core != "singbox" {
 			return fmt.Errorf("ACME 自动证书目前只支持 sing-box 内核的节点")
 		}
 		if st.SNI == "" || net.ParseIP(st.SNI) != nil || !strings.Contains(st.SNI, ".") {
-			return fmt.Errorf("ACME 证书需要把 SNI 填成解析到这台服务器的域名")
+			return fmt.Errorf("ACME 证书需要把 SNI 填成你的域名")
+		}
+		if st.CertMode == "acme_dns" && s.st.Setting("cf_api_token") == "" {
+			return fmt.Errorf("DNS 验证需要先在「设置」里填写 Cloudflare API 令牌")
 		}
 	}
 	st.HopPorts = strings.TrimSpace(st.HopPorts)
@@ -290,6 +294,12 @@ func (s *Server) handleCreateNode(w http.ResponseWriter, r *http.Request, a *sto
 		writeErr(w, 400, err.Error())
 		return
 	}
+	if r.URL.Query().Get("force") != "1" {
+		if err := s.checkNodePorts(&n, nil); err != nil {
+			writeErr(w, 409, err.Error())
+			return
+		}
+	}
 	id, err := s.st.CreateNode(&n)
 	if err != nil {
 		writeErr(w, 500, err.Error())
@@ -319,6 +329,12 @@ func (s *Server) handleUpdateNode(w http.ResponseWriter, r *http.Request, a *sto
 	if err := s.normalizeNode(&n); err != nil {
 		writeErr(w, 400, err.Error())
 		return
+	}
+	if r.URL.Query().Get("force") != "1" {
+		if err := s.checkNodePorts(&n, old); err != nil {
+			writeErr(w, 409, err.Error())
+			return
+		}
 	}
 	if err := s.st.UpdateNode(&n); err != nil {
 		writeErr(w, 500, err.Error())

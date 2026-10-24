@@ -221,6 +221,7 @@ func (a *Agent) do(method, path string, body any, out any) error {
 func (a *Agent) heartbeat() (*proto.HeartbeatResp, error) {
 	hb := &proto.Heartbeat{AgentVersion: proto.AgentVersion, CoreVersions: map[string]string{}, CoreRunning: map[string]bool{}}
 	a.sys.Collect(hb)
+	hb.Ports = ListeningPorts()
 	a.refreshPublicIP()
 	a.mu.Lock()
 	hb.PublicIPv4, hb.PublicIPv6 = a.pubV4, a.pubV6

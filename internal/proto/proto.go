@@ -2,7 +2,7 @@
 package proto
 
 // AgentVersion is bumped whenever the agent changes in a way the master cares about.
-const AgentVersion = "1.1.0"
+const AgentVersion = "1.2.0"
 
 // Heartbeat is sent by the agent every few seconds.
 type Heartbeat struct {
@@ -36,6 +36,15 @@ type Heartbeat struct {
 	CoreRunning   map[string]bool   `json:"core_running"`
 	ConfigVersion string            `json:"config_version"` // version currently applied
 	ApplyError    string            `json:"apply_error"`
+	// Ports are the TCP/UDP ports in use on the host by programs other than the agent's own cores.
+	Ports []ListenPort `json:"ports"`
+}
+
+// ListenPort is one listening socket owned by a foreign process.
+type ListenPort struct {
+	Proto string `json:"proto"` // tcp | udp
+	Port  int    `json:"port"`
+	Proc  string `json:"proc"`
 }
 
 // HeartbeatResp tells the agent whether to fetch a new config and what commands to run.
@@ -107,6 +116,10 @@ type NodeSettings struct {
 	ACMEEmail string `json:"acme_email,omitempty"`
 	// Port hopping for QUIC protocols: UDP range redirected to Port, e.g. "20000-40000"
 	HopPorts string `json:"hop_ports,omitempty"`
+	// DNS-01 ACME (cert_mode=acme_dns, sing-box only). The token is injected by the master from its
+	// settings at config-build time and is never stored on the node.
+	ACMEDNSProvider string `json:"acme_dns_provider,omitempty"`
+	ACMEDNSToken    string `json:"acme_dns_token,omitempty"`
 	// Hysteria2 masquerade: URL served to non-Hysteria HTTP/3 probes, e.g. https://www.bing.com
 	Masquerade string `json:"masquerade,omitempty"`
 }

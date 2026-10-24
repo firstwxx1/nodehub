@@ -48,6 +48,7 @@ func TestRenderValidates(t *testing.T) {
 		mk(17, "singbox", "vmess", proto.NodeSettings{Network: "grpc", ServiceName: "g"}),
 		mk(18, "singbox", "hysteria2", proto.NodeSettings{SNI: "hy.example.com", CertMode: "acme", ACMEEmail: "a@example.com", UpMbps: 1000, DownMbps: 1000,
 			Obfs: "salamander", ObfsPassword: "x", HopPorts: "30000-40000", Masquerade: "https://www.bing.com"}),
+		mk(19, "singbox", "hysteria2", proto.NodeSettings{SNI: "us.example.com", CertMode: "acme_dns", ACMEDNSProvider: "cloudflare", ACMEDNSToken: "tok", ACMEEmail: "a@example.com"}),
 	}
 	for _, n := range nodes {
 		if NeedsCert(n) {
@@ -86,5 +87,13 @@ func TestHopRules(t *testing.T) {
 	r := hopRules(nodes)
 	if len(r) != 1 || r[0] != (hopRule{20000, 40000, 16305}) {
 		t.Fatalf("%+v", r)
+	}
+}
+
+func TestACMEDNSNeedsToken(t *testing.T) {
+	n := proto.NodeConfig{ID: 1, Name: "x", Core: "singbox", Protocol: "hysteria2", Port: 443, Users: []proto.NodeUser{{Key: "k", UUID: "u", Password: "p"}},
+		Settings: proto.NodeSettings{SNI: "us.example.com", CertMode: "acme_dns"}}
+	if _, err := RenderSingbox([]proto.NodeConfig{n}, RenderOptions{CertDir: t.TempDir(), ACMEDir: t.TempDir()}); err == nil {
+		t.Fatal("expected error without a DNS token")
 	}
 }

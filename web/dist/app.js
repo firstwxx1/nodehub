@@ -375,7 +375,12 @@ async function importFlow(serverId, reload) {
     if (res.status === 'done' || res.status === 'failed') break;
   }
   m.close();
-  if (!res || res.status !== 'done') return toast(res && res.error ? '扫描结果：' + res.error : '扫描超时，请确认 Agent 在线', true);
+  if (!res || res.status !== 'done') {
+    const why = res && res.error ? res.error : '扫描超时，请确认 Agent 在线（服务器页面应显示在线）。';
+    return modal('没有可导入的节点', `<p style="margin-top:0"><b>${esc(why)}</b></p>
+      <div class="note info">导入功能目前只认识「hysteria2-installer」脚本装出来的节点。这台服务器上没有那个脚本的配置，所以什么都没有导入，节点页面也不会有变化。</div>
+      <p class="muted" style="font-size:13px;margin-bottom:0">如果这台上的节点是别的方式装的（x-ui、3x-ui、手写 Xray 等），可以直接在「节点」页面新建，端口被占用时会提示并推荐空闲端口。</p>`, { cancelText: '知道了' });
+  }
   const sc = res.scan;
   const users = sc.users || [];
   const body = `<div class="note info" style="margin-bottom:12px">检测到 <b>${esc(sc.kind)}</b>${sc.version ? '（Hysteria ' + esc(sc.version) + '）' : ''}。导入后 NodeHub 用 sing-box 接管，<b>端口、密码、混淆密钥、证书全部沿用</b>，客户端不用改配置；原服务会被停用但文件保留，可随时回滚。</div>
@@ -494,7 +499,7 @@ function nodeForm(n, servers, panels) {
     ${inp('服务器', 'server_id', n.server_id, { opts: srvOpts, dtype: 'int' })}
     ${inp('协议', 'protocol', n.protocol || 'vless', { opts: PROTOS })}
     ${inp('内核', 'core', n.core || '', { opts: [['', '自动'], ['xray', 'Xray'], ['singbox', 'sing-box']] })}
-    ${inp('监听端口', 'port', n.port || '', { type: 'number', dtype: 'int', ph: '443' })}
+    ${inp('监听端口', 'port', n.port || '', { type: 'number', dtype: 'int', ph: '留空自动选空闲端口', hint: '<span id="portHint"></span>' })}
     ${inp('监听地址', 'listen', n.listen, { ph: '默认 0.0.0.0（全部）' })}
     ${inp('客户端连接地址', 'address', n.address, { ph: '默认用服务器地址；可填 CDN/中转域名', hint: '写进订阅的地址' })}
     ${inp('检测 IP', 'egress_ip', n.egress_ip, { ph: '默认用服务器公网 IP', hint: '多 IP / 落地机时填出口 IP' })}
@@ -515,8 +520,8 @@ function nodeForm(n, servers, panels) {
 
     ${inp('SNI', 'settings.sni', s.sni, { when: 'tlsish', ph: 'hy2/tuic 默认 www.bing.com' })}
     ${inp('ALPN', 'settings.alpn', s.alpn, { when: 'tlsish', ph: '逗号分隔，留空用默认' })}
-    ${inp('证书', 'settings.cert_mode', s.cert_mode || 'self', { opts: [['self', '自签证书（客户端需允许不安全）'], ['acme', 'ACME 自动申请（Let\'s Encrypt，仅 sing-box）'], ['file', '使用服务器上的证书文件']], when: 'tlsish' })}
-    ${inp('ACME 邮箱', 'settings.acme_email', s.acme_email, { when: 'tlsish;cert:acme', hint: 'SNI 必须是解析到这台服务器的域名，且 80 端口能从外网访问' })}
+    ${inp('证书', 'settings.cert_mode', s.cert_mode || 'self', { opts: [['self', '自签证书（客户端需允许不安全）'], ['acme_dns', 'ACME · DNS 验证（Cloudflare，推荐，不占端口，仅 sing-box）'], ['acme', 'ACME · HTTP 验证（需 80 端口空闲，仅 sing-box）'], ['file', '使用服务器上的证书文件']], when: 'tlsish' })}
+    ${inp('ACME 邮箱', 'settings.acme_email', s.acme_email, { when: 'tlsish;cert:acme,acme_dns', hint: '<span id="acmeHint">SNI 填你的域名。DNS 验证需先在「设置 → 证书」填 Cloudflare 令牌；HTTP 验证需要 80 端口空闲且域名解析到本机。</span>' })}
     ${inp('证书路径', 'settings.cert_file', s.cert_file, { when: 'tlsish;cert:file', ph: '/etc/ssl/xxx/fullchain.pem' })}
     ${inp('私钥路径', 'settings.key_file', s.key_file, { when: 'tlsish;cert:file', ph: '/etc/ssl/xxx/privkey.pem' })}
     ${inp('uTLS 指纹', 'settings.fingerprint', s.fingerprint || 'chrome', { opts: ['chrome', 'firefox', 'safari', 'ios', 'edge', 'random'], when: 'proto:vless,vmess,trojan;sec:tls,reality' })}
@@ -552,9 +557,37 @@ function nodeForm(n, servers, panels) {
   </div>`;
 }
 
-function wireNodeForm(m) {
+function nodeTransports(proto) {
+  return proto === 'hysteria2' || proto === 'tuic' ? 'udp' : proto === 'shadowsocks' ? 'tcp,udp' : 'tcp';
+}
+
+function wireNodeForm(m, nodeId, isNew) {
   const f = $('#nodeForm', m);
   const val = (k) => ($(`[name="${k}"]`, f) || {}).value;
+  let portTimer;
+  const checkPort = async (autofill) => {
+    const sid = val('server_id'), box = $('#portHint', f), ah = $('#acmeHint', f);
+    if (!sid || !box) return;
+    try {
+      const portEl = $('[name=port]', f);
+      const want = autofill ? 0 : Number(portEl.value) || 0;
+      const r = await api('GET', `/api/servers/${sid}/ports?transport=${nodeTransports(val('protocol'))}&want=${want}&self=${nodeId || 0}`);
+      if (!r.known) { box.textContent = '（这台服务器的 Agent 还没上报端口，升级 Agent 后可自动检测占用）'; box.style.color = ''; return; }
+      if (autofill || !want) { if (!portEl.value && r.suggest) { portEl.value = r.suggest; box.textContent = '✓ 已自动选择空闲端口 ' + r.suggest; box.style.color = 'var(--ok, #2f855a)'; } return; }
+      if (r.busy) { box.innerHTML = `⚠ 端口 ${want} 已被「${esc(r.proc)}」占用。<a href="#" data-usep="${r.suggest}">改用 ${r.suggest}</a>`; box.style.color = 'var(--bad, #c53030)'; }
+      else { box.textContent = '✓ 端口 ' + want + ' 空闲'; box.style.color = 'var(--ok, #2f855a)'; }
+      if (ah) ah.dataset.p80 = r.port80_busy ? r.port80_proc : '';
+      acmeNote();
+    } catch (e) { /* hint only */ }
+  };
+  const acmeNote = () => {
+    const ah = $('#acmeHint', f); if (!ah) return;
+    if (val('settings.cert_mode') === 'acme' && ah.dataset.p80) { ah.innerHTML = `⚠ 80 端口被「${esc(ah.dataset.p80)}」占用，HTTP 验证会失败，请改用 <b>DNS 验证</b>。`; ah.style.color = 'var(--bad, #c53030)'; }
+  };
+  f.addEventListener('click', (e) => { const a = e.target.closest('[data-usep]'); if (a) { e.preventDefault(); $('[name=port]', f).value = a.dataset.usep; checkPort(); } });
+  f.addEventListener('input', (e) => { if (e.target.name === 'port') { clearTimeout(portTimer); portTimer = setTimeout(() => checkPort(), 400); } });
+  f.addEventListener('change', (e) => { if (['server_id', 'protocol', 'settings.cert_mode'].includes(e.target.name)) checkPort(isNew && !val('port')); });
+  setTimeout(() => checkPort(isNew && !val('port')), 0);
   const apply = () => {
     const ctx = { proto: val('protocol'), net: val('settings.network'), sec: val('settings.security'), src: val('source'), cert: val('settings.cert_mode') };
     const tlsish = ['hysteria2', 'tuic', 'anytls'].includes(ctx.proto) || (['vless', 'vmess', 'trojan'].includes(ctx.proto) && ctx.sec === 'tls');
@@ -625,17 +658,25 @@ PAGES.nodes = async (el) => {
   const save = (id) => async (m) => {
     const body = readForm(m);
     if (!body.core) delete body.core;
-    const r = await api(id ? 'PUT' : 'POST', id ? '/api/nodes/' + id : '/api/nodes', body);
+    const url = id ? '/api/nodes/' + id : '/api/nodes';
+    let r;
+    try { r = await api(id ? 'PUT' : 'POST', url, body); }
+    catch (e) {
+      if (!/已被服务器上的|需要 80 端口/.test(e.message || '')) throw e;
+      const go = await new Promise((res) => { const onEsc = (ev) => { if (ev.key === 'Escape') { document.removeEventListener('keydown', onEsc); res(false); } }; document.addEventListener('keydown', onEsc); const d = modal('端口被占用', `<p style="margin:0">${esc(e.message)}</p>`, { ok: async () => { res(true); }, okText: '仍然保存', cancelText: '返回修改' }); d.el.addEventListener('click', (ev) => { if (ev.target.closest('[data-x]') || ev.target === d.el) res(false); }); });
+      if (!go) return false;
+      r = await api(id ? 'PUT' : 'POST', url + '?force=1', body);
+    }
     toast(id ? '已保存，配置将在 10 秒内下发' : '节点已创建'); await load();
     if (!id) shareModal({ ...r, connect_addr: (find(r.id) || {}).connect_addr || '' });
   };
   bind(el, {
     add: () => {
       if (!servers.length) return toast('请先添加服务器', true);
-      const m = modal('添加节点', nodeForm({ server_id: servers[0].id, port: 443 }, servers, panels), { ok: save(null), wide: true, okText: '创建' });
-      wireNodeForm(m.el);
+      const m = modal('添加节点', nodeForm({ server_id: servers[0].id }, servers, panels), { ok: save(null), wide: true, okText: '创建' });
+      wireNodeForm(m.el, 0, true);
     },
-    edit: async (id) => { const n = await api('GET', '/api/nodes/' + id); const m = modal('编辑节点', nodeForm(n, servers, panels), { ok: save(id), wide: true }); wireNodeForm(m.el); },
+    edit: async (id) => { const n = await api('GET', '/api/nodes/' + id); const m = modal('编辑节点', nodeForm(n, servers, panels), { ok: save(id), wide: true }); wireNodeForm(m.el, id, false); },
     info: (id) => shareModal(find(id)),
     toggle: async (id) => { await api('POST', `/api/nodes/${id}/toggle`); load(); },
     copyNode: async (id) => { const r = await api('POST', `/api/nodes/${id}/copy`, {}); toast(`已复制为「${r.name}」（端口 ${r.port}，默认停用）`); load(); },
@@ -879,6 +920,7 @@ PAGES.settings = async (el) => {
       ${inp('IPQualityScore Key', 'ipcheck_ipqs_key', s.ipcheck_ipqs_key, { hint: '提供真实欺诈分（免费 5000 次/月）' })}${inp('ipapi.is Key', 'ipcheck_ipapiis_key', s.ipcheck_ipapiis_key, { hint: '免费注册 1000 次/天；用于判断双 ISP、机房、滥用' })}
       ${inp('Scamalytics API 地址', 'ipcheck_scamalytics_url', s.ipcheck_scamalytics_url, { ph: 'https://api12.scamalytics.com/v3/你的用户名/' })}${inp('Scamalytics Key', 'ipcheck_scamalytics_key', s.ipcheck_scamalytics_key)}
       ${inp('AbuseIPDB Key', 'ipcheck_abuseipdb_key', s.ipcheck_abuseipdb_key)}${inp('ipinfo Token', 'ipcheck_ipinfo_token', s.ipcheck_ipinfo_token)}`, 'ipcheck')}
+    ${section('证书（DNS 验证）', `${inp('Cloudflare API 令牌', 'cf_api_token', s.cf_api_token, { full: true, hint: '在 Cloudflare「我的个人资料 → API 令牌」创建，权限：区域 · DNS · 编辑，范围选你的域名。只存在面板里，节点选「ACME · DNS 验证」时下发给对应服务器；任何 VPS 都能共用，不需要 80 端口。' })}`, 'cert')}
     ${section('通知', `${inp('Telegram Bot Token', 'tg_bot_token', s.tg_bot_token)}${inp('Telegram Chat ID', 'tg_chat_id', s.tg_chat_id)}
       ${inp('推送的事件', 'notify_events', s.notify_events, { full: true, hint: '逗号分隔，* 表示全部' })}<div class="full"><button class="btn sm" data-act="tg">发送测试消息</button></div>`, 'notify')}
     <div class="card"><div class="card-h"><h3>账户安全</h3></div><div class="card-b"><div class="btns"><button class="btn" data-act="pwd">修改密码</button>
