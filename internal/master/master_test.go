@@ -365,13 +365,13 @@ func TestScriptNode(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("finish: %d %s", w.Code, w.Body.String())
 	}
-	// a second one must be refused
+	// a second finish is idempotent and must not create another node
 	req2 := httptest.NewRequest("POST", "/api/servers/1/script-node/finish", bytes.NewReader(body))
 	req2.SetPathValue("id", "1")
 	w2 := httptest.NewRecorder()
 	s.handleScriptNodeFinish(w2, req2, nil)
-	if w2.Code == 200 {
-		t.Fatal("second finish should be refused")
+	if w2.Code != 200 {
+		t.Fatalf("second finish: %d %s", w2.Code, w2.Body.String())
 	}
 
 	srv, _ := s.st.GetServer(sid)
@@ -413,5 +413,23 @@ func TestIPChecksListNodelessServers(t *testing.T) {
 	json.Unmarshal(w.Body.Bytes(), &res)
 	if len(res.Items) != 2 || res.Items[1].NodeName != "empty" || res.Items[1].ServerID != s2 || res.Items[1].Check == nil || res.Items[1].Check.FraudScore != 7 {
 		t.Fatalf("want node-less server row with its check, got %s", w.Body.String())
+	}
+}
+
+func TestScriptNodeAutoCreate(t *testing.T) {
+	s, err := New(Options{DataDir: t.TempDir(), AdminPass: "test-pass-123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sid, _ := s.st.CreateServer(&store.Server{Name: "servercheap", PublicIPv4: "172.82.74.159", Enabled: true, TrafficResetDay: 1}, util.SHA256Hex(util.RandToken(24)))
+	cid, _ := s.st.QueueCommand(sid, "install_hy2", `{"port":443,"cert_type":3,"domain":"sc.example.com","name":"SC","groups":""}`)
+	out := `{"scan":{"kind":"hysteria2-installer","port":443,"domain":"sc.example.com","cert_mode":"acme","obfs_password":"o","hop_ports":"20000-40000","auth_password":"pw"},"log":""}`
+	s.st.FinishCommand(sid, proto.CommandResult{ID: cid, OK: true, Output: out})
+	srv, _ := s.st.GetServer(sid)
+	s.afterScriptInstall(srv, cid)
+	s.afterScriptInstall(srv, cid) // repeated reports must not duplicate the node
+	nodes, _ := s.st.NodesByServer(sid)
+	if len(nodes) != 1 || nodes[0].Name != "SC" || nodes[0].Core != "script" || nodes[0].Settings.CertMode != "acme" {
+		t.Fatalf("auto-created node: %+v", nodes)
 	}
 }

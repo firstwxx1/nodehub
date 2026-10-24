@@ -274,6 +274,9 @@ func (s *Server) agentReport(w http.ResponseWriter, r *http.Request, srv *store.
 	s.st.RefreshNodeOnlineCounts(now - 180)
 	for _, res := range rep.Results {
 		s.st.FinishCommand(srv.ID, res)
+		if res.OK {
+			s.afterScriptInstall(srv, res.ID)
+		}
 	}
 	if rep.Unlock != nil {
 		b, _ := json.Marshal(rep.Unlock)

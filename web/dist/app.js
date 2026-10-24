@@ -678,13 +678,13 @@ async function scriptFlow(servers, reload) {
     ok: async (mm) => {
       const f = readForm(mm);
       if (f.cert_type === 3 && !f.domain) throw new Error('选择域名证书时必须填写域名');
-      const r = await api('POST', `/api/servers/${f.server_id}/script-node`, { port: f.port || 0, cert_type: f.cert_type, domain: f.domain, email: f.email });
+      const r = await api('POST', `/api/servers/${f.server_id}/script-node`, { port: f.port || 0, cert_type: f.cert_type, domain: f.domain, email: f.email, name: f.name, groups: f.groups });
       scriptProgress(f.server_id, r.command_id, r.port, f, reload);
     },
   });
 }
 function scriptProgress(serverId, cmdId, port, f, reload) {
-  const m = modal('正在安装…', `<div class="muted" id="spMsg">已下发给 Agent，正在下载并运行脚本，通常 1–3 分钟（域名证书可能更久）。可以关闭这个窗口，安装会继续在服务器上进行。</div>
+  const m = modal('正在安装…', `<div class="muted" id="spMsg">已下发给 Agent，正在下载并运行脚本，通常 1–3 分钟（域名证书可能更久）。可以关闭这个窗口：安装会在服务器上继续，装好后节点自动出现在列表里。</div>
     <pre class="codebox mt" id="spLog" style="display:none;max-height:260px;overflow:auto;white-space:pre-wrap"></pre>`, { cancelText: '关闭' });
   (async () => {
     for (let i = 0; i < 300; i++) {

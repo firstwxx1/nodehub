@@ -27,6 +27,8 @@ type InstallReq struct {
 	Email    string `json:"email"`
 	CFToken  string `json:"cf_token"`
 	CFEmail  string `json:"cf_email"`
+	Name     string `json:"name,omitempty"`   // used by the master only
+	Groups   string `json:"groups,omitempty"` // used by the master only
 }
 
 // InstallResult is returned (as JSON) by install_hy2.

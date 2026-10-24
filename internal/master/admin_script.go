@@ -33,6 +33,8 @@ func (s *Server) handleScriptNodeInstall(w http.ResponseWriter, r *http.Request,
 		CertType int    `json:"cert_type"`
 		Domain   string `json:"domain"`
 		Email    string `json:"email"`
+		Name     string `json:"name"`
+		Groups   string `json:"groups"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		writeErr(w, 400, err.Error())
@@ -71,7 +73,7 @@ func (s *Server) handleScriptNodeInstall(w http.ResponseWriter, r *http.Request,
 		}
 	}
 	arg, _ := json.Marshal(agent.InstallReq{URL: s.st.Setting("installer_url"), Port: req.Port, CertType: req.CertType,
-		Domain: strings.TrimSpace(req.Domain), Email: strings.TrimSpace(req.Email)})
+		Domain: strings.TrimSpace(req.Domain), Email: req.Email, Name: strings.TrimSpace(req.Name), Groups: req.Groups})
 	id, err := s.st.QueueCommand(srv.ID, "install_hy2", string(arg))
 	if err != nil {
 		writeErr(w, 500, err.Error())
@@ -116,8 +118,8 @@ func (s *Server) handleScriptNodeFinish(w http.ResponseWriter, r *http.Request, 
 	}
 	nodes, _ := s.st.NodesByServer(srv.ID)
 	for _, n := range nodes {
-		if n.Core == "script" {
-			writeErr(w, 400, "这台服务器的脚本节点已经创建过了")
+		if n.Core == "script" { // already created when the agent reported the result
+			ok(w, map[string]any{"node_id": n.ID})
 			return
 		}
 	}
@@ -202,4 +204,32 @@ func (s *Server) handleScriptNodeAdopt(w http.ResponseWriter, r *http.Request, a
 	s.bump()
 	s.audit(r, a, "script.adopt", fmt.Sprint(srv.ID), fmt.Sprint(id))
 	ok(w, map[string]any{"node_id": id})
+}
+
+// afterScriptInstall creates the node as soon as the agent reports a successful install_hy2, so it does not
+// depend on the browser window staying open until the (sometimes minutes long) installation finishes.
+func (s *Server) afterScriptInstall(srv *store.Server, cmdID int64) {
+	c, err := s.st.GetCommand(cmdID)
+	if err != nil || c.Type != "install_hy2" || c.Status != "done" {
+		return
+	}
+	var res agent.InstallResult
+	if json.Unmarshal([]byte(c.Output), &res) != nil || res.Scan == nil {
+		return
+	}
+	var arg agent.InstallReq
+	_ = json.Unmarshal([]byte(c.Arg), &arg)
+	nodes, _ := s.st.NodesByServer(srv.ID)
+	for _, n := range nodes {
+		if n.Core == "script" {
+			return
+		}
+	}
+	id, err := s.createScriptNode(srv, res.Scan, arg.Name, arg.Groups)
+	if err != nil {
+		s.emit("node.script_failed", "warn", fmt.Sprintf("服务器 %s 的原版脚本已装好，但收进面板失败：%v", srv.Name, err), map[string]any{"server_id": srv.ID})
+		return
+	}
+	s.bump()
+	s.emit("node.script_created", "info", fmt.Sprintf("服务器 %s 的原版脚本节点已创建（端口 %d）", srv.Name, res.Scan.Port), map[string]any{"server_id": srv.ID, "node_id": id})
 }
