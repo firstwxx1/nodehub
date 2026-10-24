@@ -302,3 +302,29 @@ func TestIPChecksOneRowPerIP(t *testing.T) {
 		t.Fatalf("want 1 row titled by server with 2 nodes, got %+v", items)
 	}
 }
+
+func TestSamePortDifferentTransport(t *testing.T) {
+	s, err := New(Options{DataDir: t.TempDir(), AdminPass: "test-pass-123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sid, _ := s.st.CreateServer(&store.Server{Name: "s1", Enabled: true, TrafficResetDay: 1}, util.SHA256Hex(util.RandToken(24)))
+	vl := &store.Node{ServerID: sid, Name: "vl", Protocol: "vless", Port: 443, Enabled: true}
+	if err := s.normalizeNode(vl); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.st.CreateNode(vl); err != nil {
+		t.Fatal(err)
+	}
+	hy := &store.Node{ServerID: sid, Name: "hy", Protocol: "hysteria2", Port: 443, Enabled: true}
+	if err := s.normalizeNode(hy); err != nil {
+		t.Fatalf("udp 443 must coexist with tcp 443: %v", err)
+	}
+	if _, err := s.st.CreateNode(hy); err != nil {
+		t.Fatal(err)
+	}
+	tr := &store.Node{ServerID: sid, Name: "tr", Protocol: "trojan", Port: 443, Enabled: true}
+	if err := s.normalizeNode(tr); err == nil || !strings.Contains(err.Error(), "vl") {
+		t.Fatalf("second tcp 443 must be refused naming the node, got %v", err)
+	}
+}

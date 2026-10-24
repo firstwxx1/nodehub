@@ -50,8 +50,21 @@ func (s *Server) normalizeNode(n *store.Node) error {
 	if _, err := s.st.GetServer(n.ServerID); err != nil {
 		return fmt.Errorf("服务器不存在")
 	}
-	if s.st.PortInUse(n.ServerID, n.Port, n.ID) {
-		return fmt.Errorf("该服务器上端口 %d 已被其他节点占用", n.Port)
+	// the same port number may be reused when the transports differ (e.g. VLESS on TCP 443 and Hysteria2 on UDP 443)
+	if others, _ := s.st.NodesByServer(n.ServerID); true {
+		mine := nodeTransports(n)
+		for _, o := range others {
+			if o.ID == n.ID || o.Port != n.Port {
+				continue
+			}
+			for _, t1 := range mine {
+				for _, t2 := range nodeTransports(o) {
+					if t1 == t2 {
+						return fmt.Errorf("该服务器上端口 %d/%s 已被节点「%s」占用", n.Port, t1, o.Name)
+					}
+				}
+			}
+		}
 	}
 	if n.Rate <= 0 {
 		n.Rate = 1
