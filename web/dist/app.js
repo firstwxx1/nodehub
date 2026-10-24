@@ -708,10 +708,10 @@ PAGES.ipq = async (el) => {
     el.innerHTML = topbar('IP 质量', '原生/广播、连接类型、双 ISP、风险标记与欺诈分，多数据源聚合' + (running ? ' · <span class="warn-t">检测进行中…</span>' : ''),
       `<button class="btn primary" data-act="runAll" ${running ? 'disabled' : ''}>${icon('refresh')}全部检测</button>`) +
       `<div class="tabs" style="margin-bottom:12px">${tabs.map(([k, l, arr]) => `<button data-act="tab" data-tab="${k}" class="${tab === k ? 'on' : ''}">${l}<span class="c">${arr.length}</span></button>`).join('')}</div>
-      <div class="card tbl-wrap"><table class="tbl"><thead><tr><th>服务器 / IP</th><th>原生 IP</th><th>连接类型</th><th>双 ISP</th><th>风险标记</th><th>欺诈分</th><th>ASN / 归属</th><th>检测时间</th><th></th></tr></thead><tbody>
+      <div class="card tbl-wrap"><table class="tbl"><thead><tr><th>服务器 / IP</th><th>原生 IP</th><th>连接类型</th><th>双 ISP</th><th>风险标记</th><th>欺诈分</th><th>解锁（从该服务器访问）</th><th>ASN / 归属</th><th>检测时间</th><th></th></tr></thead><tbody>
       ${rows.length ? rows.map((r) => {
         const c = r.check;
-        if (!c || c.error) return `<tr data-id="${r.node_id}"><td><div class="cell-2"><b>${esc(r.node_name)}</b><small class="mono">${esc(r.ip || '—')}</small></div></td><td colspan="7" class="${c ? 'bad-t' : 'faint'}">${c ? '检测失败：' + esc(c.error.slice(0, 120)) : '未检测'}</td><td><button class="btn icon sm" data-act="check" title="检测" aria-label="检测">${icon('refresh')}</button></td></tr>`;
+        if (!c || c.error) return `<tr data-id="${r.node_id}"><td><div class="cell-2"><b>${esc(r.node_name)}</b><small class="mono">${esc(r.ip || '—')}</small></div></td><td colspan="8" class="${c ? 'bad-t' : 'faint'}">${c ? '检测失败：' + esc(c.error.slice(0, 120)) : '未检测'}</td><td><button class="btn icon sm" data-act="check" title="检测" aria-label="检测">${icon('refresh')}</button></td></tr>`;
         const risks = [[c.is_proxy, '代理'], [c.is_vpn, 'VPN'], [c.is_abuse, '滥用'], [c.is_tor, 'Tor']].filter((x) => x[0]);
         const [ct, ci] = CONN[c.conn_type] || CONN.unknown;
         return `<tr data-id="${r.node_id}">
@@ -721,10 +721,11 @@ PAGES.ipq = async (el) => {
           <td>${c.dual_isp ? '<span class="pill ok">双 ISP</span>' : '<span class="muted">否</span>'}</td>
           <td>${risks.length ? `<div class="row wrap" style="gap:4px">${risks.map((x) => `<span class="pill bad">${x[1]}</span>`).join('')}</div>` : '<span class="ok-t">无风险</span>'}</td>
           <td><span class="score ${c.fraud_score >= 70 ? 'hi' : c.fraud_score >= 30 ? 'mid' : 'lo'}" title="来源：${esc({ ipqs: 'IPQualityScore', scamalytics: 'Scamalytics', estimate: '估算（配置 IPQS / Scamalytics Key 可得到真实分数）' }[c.fraud_source] || c.fraud_source)}">${c.fraud_score}</span>${c.fraud_source === 'estimate' ? '<small class="faint"> 估</small>' : ''}</td>
+          <td>${unlockPills(r.unlock)}</td>
           <td><div class="cell-2"><span>${esc(c.asn)}</span><small>${esc(c.org)}</small></div></td>
           <td class="nowrap">${fmtTime(c.checked_at)}</td>
           <td><div class="row" style="gap:4px"><button class="btn icon sm" data-act="check" title="重新检测" aria-label="重新检测">${icon('refresh')}</button><button class="btn sm" data-act="raw">详情</button></div></td></tr>`;
-      }).join('') : '<tr><td colspan="9" class="empty">没有符合条件的服务器</td></tr>'}</tbody></table></div>
+      }).join('') : '<tr><td colspan="10" class="empty">没有符合条件的服务器</td></tr>'}</tbody></table></div>
       <p class="faint" style="font-size:12px">免费数据源：RDAP（注册地）、ip-api、ipapi.is。在「设置 → IP 检测」中填入 IPQualityScore / Scamalytics / AbuseIPDB / ipinfo / ipapi.is 的 Key 可提高准确度（ipapi.is 免 Key 时只返回基础信息，双 ISP 判断需要它的 Key）。</p>`;
   };
   bind(el, {

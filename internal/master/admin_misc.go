@@ -453,13 +453,14 @@ func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request, a *store.A
 // ---------------- ip checks ----------------
 
 type ipRow struct {
-	NodeID     int64          `json:"node_id"`
-	NodeName   string         `json:"node_name"` // shown as the row title: the server name (or the node name when a node has its own egress IP)
-	ServerName string         `json:"server_name"`
-	Nodes      []string       `json:"nodes"` // every node that exits through this IP
-	Region     string         `json:"region"`
-	IP         string         `json:"ip"`
-	Check      *store.IPCheck `json:"check"`
+	NodeID     int64           `json:"node_id"`
+	NodeName   string          `json:"node_name"` // shown as the row title: the server name (or the node name when a node has its own egress IP)
+	ServerName string          `json:"server_name"`
+	Nodes      []string        `json:"nodes"` // every node that exits through this IP
+	Region     string          `json:"region"`
+	IP         string          `json:"ip"`
+	Check      *store.IPCheck  `json:"check"`
+	Unlock     json.RawMessage `json:"unlock,omitempty"` // latest streaming/AI unlock test of the server
 }
 
 // handleListIPChecks returns one row per egress IP, so several nodes on one server show up once.
@@ -501,6 +502,9 @@ func (s *Server) handleListIPChecks(w http.ResponseWriter, r *http.Request, a *s
 		row := ipRow{NodeID: v.ID, NodeName: v.ServerName, ServerName: v.ServerName, Nodes: []string{v.Name}, IP: ip, Check: v.IPCheck}
 		if srv != nil {
 			row.Region = srv.Region
+			if json.Valid(srv.Unlock) && len(srv.Unlock) > 2 {
+				row.Unlock = srv.Unlock
+			}
 		}
 		byIP[key] = len(out)
 		out = append(out, row)
