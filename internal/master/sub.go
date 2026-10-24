@@ -383,12 +383,25 @@ func renderClash(nodes []subNode, u *store.User, site string) string {
 	sb.WriteString("  - " + yamlStr(map[string]any{"name": sel, "type": "select", "proxies": append([]string{auto, "DIRECT"}, names...)}) + "\n")
 	sb.WriteString("  - " + yamlStr(map[string]any{"name": auto, "type": "url-test", "url": "https://www.gstatic.com/generate_204", "interval": 300, "tolerance": 50, "proxies": names}) + "\n")
 	sb.WriteString("rules:\n")
-	for _, r := range []string{"DOMAIN-SUFFIX,local,DIRECT", "IP-CIDR,127.0.0.0/8,DIRECT,no-resolve", "IP-CIDR,192.168.0.0/16,DIRECT,no-resolve",
-		"IP-CIDR,10.0.0.0/8,DIRECT,no-resolve", "IP-CIDR,172.16.0.0/12,DIRECT,no-resolve", "GEOSITE,CN,DIRECT", "GEOIP,CN,DIRECT", "MATCH," + sel} {
+	rules := []string{"DOMAIN-SUFFIX,local,DIRECT", "IP-CIDR,127.0.0.0/8,DIRECT,no-resolve", "IP-CIDR,192.168.0.0/16,DIRECT,no-resolve",
+		"IP-CIDR,10.0.0.0/8,DIRECT,no-resolve", "IP-CIDR,172.16.0.0/12,DIRECT,no-resolve"}
+	// international sites of Chinese clouds sit on CDNs whose IPs are registered in China (and are listed in
+	// geosite:cn), so they would go DIRECT and time out from mainland networks
+	for _, d := range intlProxyDomains {
+		rules = append(rules, "DOMAIN-SUFFIX,"+d+","+sel)
+	}
+	// GEOIP only for connections that already are IPs: resolving every domain to test its IP sends foreign
+	// sites hosted on China-registered CDN ranges (EdgeOne, Alibaba CDN) DIRECT
+	rules = append(rules, "GEOSITE,CN,DIRECT", "GEOIP,CN,DIRECT,no-resolve", "MATCH,"+sel)
+	for _, r := range rules {
 		sb.WriteString("  - " + r + "\n")
 	}
 	return sb.String()
 }
+
+// intlProxyDomains always go through the proxy in generated client rules.
+var intlProxyDomains = []string{"tencentcloud.com", "tencentcloud.co", "edgeone.ai", "alibabacloud.com",
+	"byteplus.com", "tiktok.com", "tiktokv.com", "tiktokcdn.com"}
 
 // ---------------- sing-box ----------------
 
@@ -577,7 +590,11 @@ func renderSurge(nodes []subNode, u *store.User, selfURL string) string {
 	}
 	sb.WriteString("\n[Proxy Group]\nProxy = select, Auto, " + strings.Join(names, ", ") + "\n")
 	sb.WriteString("Auto = url-test, " + strings.Join(names, ", ") + ", url=http://www.gstatic.com/generate_204, interval=300\n")
-	sb.WriteString("\n[Rule]\nGEOIP,CN,DIRECT\nFINAL,Proxy,dns-failed\n")
+	sb.WriteString("\n[Rule]\n")
+	for _, d := range intlProxyDomains {
+		sb.WriteString("DOMAIN-SUFFIX," + d + ",Proxy\n")
+	}
+	sb.WriteString("GEOIP,CN,DIRECT\nFINAL,Proxy,dns-failed\n")
 	return sb.String()
 }
 
