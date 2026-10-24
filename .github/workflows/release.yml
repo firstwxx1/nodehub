@@ -1,0 +1,26 @@
+# Push a tag like v1.1.0 to build the master, the agents and sing-box (with per-user stats)
+# for linux amd64/arm64 and attach them to a GitHub release.
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+      - run: go test ./...
+      - run: OUT=build ./scripts/build.sh
+      - name: flatten assets
+        run: |
+          mkdir -p assets
+          cp build/nodehub-linux-* build/dist/* build/SHA256SUMS assets/
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: assets/*
+          generate_release_notes: true

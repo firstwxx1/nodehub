@@ -1,0 +1,6 @@
+build/
+data/
+caddy/
+*.db
+*.db-wal
+*.db-shm

@@ -1,0 +1,186 @@
+package master
+
+import (
+	"bytes"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"nodehub/internal/proto"
+	"nodehub/internal/store"
+	"nodehub/internal/util"
+)
+
+func TestNeedsReset(t *testing.T) {
+	loc := time.Local
+	now := time.Date(2026, 10, 24, 12, 0, 0, 0, loc)
+	cases := []struct {
+		strategy string
+		day      int
+		last     time.Time
+		want     bool
+	}{
+		{"none", 1, now.AddDate(-1, 0, 0), false},
+		{"monthly", 1, time.Date(2026, 9, 30, 0, 0, 0, 0, loc), true},
+		{"monthly", 1, time.Date(2026, 10, 1, 0, 0, 1, 0, loc), false},
+		{"day_of_month", 20, time.Date(2026, 10, 19, 0, 0, 0, 0, loc), true},
+		{"day_of_month", 20, time.Date(2026, 10, 20, 1, 0, 0, 0, loc), false},
+		{"day_of_month", 28, time.Date(2026, 9, 27, 0, 0, 0, 0, loc), true},  // boundary is Sep 28
+		{"day_of_month", 28, time.Date(2026, 9, 28, 1, 0, 0, 0, loc), false}, // already reset this cycle
+	}
+	for i, c := range cases {
+		u := &store.User{ResetStrategy: c.strategy, ResetDay: c.day, LastResetAt: c.last.Unix()}
+		if got := needsReset(u, now); got != c.want {
+			t.Errorf("case %d (%s day %d last %s): got %v want %v", i, c.strategy, c.day, c.last, got, c.want)
+		}
+	}
+}
+
+func TestHelpers(t *testing.T) {
+	if !eventMatches("user.*,server.offline", "user.expired") || eventMatches("user.*", "server.offline") || !eventMatches("*", "x") {
+		t.Fatal("eventMatches")
+	}
+	if k, id, ok := parseUserKey("n12.p345"); !ok || k != 'p' || id != 345 {
+		t.Fatal("parseUserKey panel")
+	}
+	if _, _, ok := parseUserKey("garbage"); ok {
+		t.Fatal("parseUserKey garbage")
+	}
+	if flagEmoji("jp") != "🇯🇵" || flagEmoji("") != "🌐" {
+		t.Fatal("flagEmoji")
+	}
+	n := &store.Node{Groups: "vip, pro"}
+	if !nodeVisible(n, &store.User{Groups: "pro"}) || nodeVisible(n, &store.User{Groups: "basic"}) || !nodeVisible(&store.Node{}, &store.User{}) {
+		t.Fatal("nodeVisible")
+	}
+}
+
+func TestShareLinks(t *testing.T) {
+	u := &store.User{UUID: "eeb47318-d4ce-475f-a14f-d14c80103045"}
+	ss := subNode{Name: "SS", Addr: "1.2.3.4", Node: &store.Node{Protocol: "shadowsocks", Port: 8388,
+		Settings: proto.NodeSettings{Cipher: "2022-blake3-aes-128-gcm", ServerKey: "zhnUqw+nBgzVhdlummT/dQ=="}}}
+	l := shareLink(ss, u)
+	if strings.ContainsAny(strings.SplitN(strings.TrimPrefix(l, "ss://"), "@", 2)[0], "+/=") {
+		t.Fatalf("ss userinfo not percent-encoded: %s", l)
+	}
+	v6 := subNode{Name: "v6", Addr: "2001:db8::1", Node: &store.Node{Protocol: "hysteria2", Port: 443, Settings: proto.NodeSettings{SNI: "a.com", CertMode: "self"}}}
+	if l := shareLink(v6, u); !strings.Contains(l, "@[2001:db8::1]:443") || !strings.Contains(l, "insecure=1") {
+		t.Fatalf("ipv6 link: %s", l)
+	}
+}
+
+// ---------------- HTTP flow ----------------
+
+type client struct {
+	t   *testing.T
+	srv *httptest.Server
+}
+
+func (c *client) do(method, path, auth string, body any, hdr ...string) (int, map[string]any) {
+	var rd io.Reader
+	if body != nil {
+		b, _ := json.Marshal(body)
+		rd = bytes.NewReader(b)
+	}
+	req, _ := http.NewRequest(method, c.srv.URL+path, rd)
+	req.Header.Set("Authorization", auth)
+	req.Header.Set("Content-Type", "application/json")
+	for i := 0; i+1 < len(hdr); i += 2 {
+		req.Header.Set(hdr[i], hdr[i+1])
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var m map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&m)
+	return resp.StatusCode, m
+}
+
+func TestOpenAPIAndAgentFlow(t *testing.T) {
+	s, err := New(Options{DataDir: t.TempDir(), AdminPass: "test-pass-123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(s.middleware(s.mux))
+	defer ts.Close()
+	c := &client{t: t, srv: ts}
+
+	// a server with one local node in group "vip"
+	agentTok := util.RandToken(24)
+	sid, _ := s.st.CreateServer(&store.Server{Name: "s1", Enabled: true, TrafficResetDay: 1}, util.SHA256Hex(agentTok))
+	n := &store.Node{ServerID: sid, Name: "n1", Protocol: "vless", Port: 443, Groups: "vip", Enabled: true}
+	if err := s.normalizeNode(n); err != nil {
+		t.Fatal(err)
+	}
+	nid, _ := s.st.CreateNode(n)
+
+	raw := "nhk_" + util.RandToken(30)
+	_, _ = s.st.CreateAPIKey("shop", raw[:10], util.SHA256Hex(raw), "read,write", "")
+	auth := "Bearer " + raw
+
+	if code, _ := c.do("GET", "/api/open/v1/ping", "Bearer nope", nil); code != 401 {
+		t.Fatalf("bad key: %d", code)
+	}
+	code, u := c.do("PUT", "/api/open/v1/users/by-external/o1", auth, map[string]any{"traffic_limit_gb": 1, "extend_days": 30, "groups": "vip"}, "Idempotency-Key", "k1")
+	if code != 201 || u["status"] != "active" {
+		t.Fatalf("upsert: %d %v", code, u)
+	}
+	uid := int64(u["id"].(float64))
+	// replay returns the same response, reuse on another endpoint is rejected
+	if code, u2 := c.do("PUT", "/api/open/v1/users/by-external/o1", auth, map[string]any{"extend_days": 30}, "Idempotency-Key", "k1"); code != 201 || u2["expire_at"] != u["expire_at"] {
+		t.Fatalf("replay: %d %v", code, u2)
+	}
+	if code, _ := c.do("PATCH", "/api/open/v1/users/ext:o1", auth, map[string]any{"extend_days": 1}, "Idempotency-Key", "k1"); code != 422 {
+		t.Fatalf("key reuse: %d", code)
+	}
+	if code, r := c.do("GET", "/api/open/v1/idempotency/k1", auth, nil); code != 200 || r["found"] != true {
+		t.Fatalf("idem lookup: %v", r)
+	}
+
+	// agent sees the user on the node
+	code, cfg := c.do("GET", "/agent/v1/config", "Bearer "+agentTok, nil)
+	if code != 200 {
+		t.Fatalf("agent config %d", code)
+	}
+	nodes := cfg["nodes"].([]any)
+	users := nodes[0].(map[string]any)["users"].([]any)
+	if len(users) != 1 || users[0].(map[string]any)["key"] != userKeyLocal(nid, uid) {
+		t.Fatalf("agent users: %v", users)
+	}
+	ver1 := cfg["version"]
+
+	// report 2 GB of traffic -> user exhausted -> removed from the node config
+	rep := proto.Report{Traffic: []proto.TrafficDelta{{NodeID: nid, Key: userKeyLocal(nid, uid), Up: 0, Down: 2 << 30}}}
+	if code, _ := c.do("POST", "/agent/v1/report", "Bearer "+agentTok, rep); code != 200 {
+		t.Fatalf("report %d", code)
+	}
+	_, u = c.do("GET", "/api/open/v1/users/ext:o1", auth, nil)
+	if u["status"] != "exhausted" {
+		t.Fatalf("expected exhausted, got %v", u["status"])
+	}
+	_, cfg = c.do("GET", "/agent/v1/config", "Bearer "+agentTok, nil)
+	if cfg["version"] == ver1 || len(cfg["nodes"].([]any)[0].(map[string]any)["users"].([]any)) != 0 {
+		t.Fatalf("exhausted user still on node: %v", cfg)
+	}
+	// top-up brings the user back
+	_, u = c.do("PATCH", "/api/open/v1/users/ext:o1", auth, map[string]any{"add_traffic_gb": 5})
+	if u["status"] != "active" {
+		t.Fatalf("after top-up: %v", u["status"])
+	}
+	// subscription reflects usage and the user's nodes
+	resp, err := http.Get(ts.URL + "/sub/" + u["sub_token"].(string) + "?target=clash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(resp.Header.Get("Subscription-Userinfo"), "download=2147483648") || !strings.Contains(string(body), `"type":"vless"`) {
+		t.Fatalf("sub: %s\n%s", resp.Header.Get("Subscription-Userinfo"), body)
+	}
+}

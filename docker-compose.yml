@@ -1,0 +1,32 @@
+services:
+  nodehub:
+    build: .
+    image: nodehub:latest
+    container_name: nodehub
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      # 面板对外地址（Agent 安装命令、订阅链接都用它）
+      NODEHUB_PUBLIC_URL: https://nodes.example.com
+      # 首次启动创建的管理员；不填密码会随机生成并打印在日志里
+      NODEHUB_ADMIN_USER: admin
+      NODEHUB_ADMIN_PASS: ""
+      # 放在 Caddy/Nginx 后面时设为 1，才会信任 X-Forwarded-For
+      NODEHUB_TRUST_PROXY: "1"
+    volumes:
+      - ./data:/data
+    expose:
+      - "8080"
+
+  # 自动 HTTPS。把 nodes.example.com 换成你的域名并解析到这台机器
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    command: caddy reverse-proxy --from nodes.example.com --to nodehub:8080
+    volumes:
+      - ./caddy:/data
+    depends_on:
+      - nodehub
