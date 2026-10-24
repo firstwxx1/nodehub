@@ -23,9 +23,10 @@ done
 if [ "${SKIP_SINGBOX:-0}" != 1 ]; then
   echo "==> sing-box $SINGBOX_VERSION with v2ray_api (per-user traffic stats)"
   TMP=$(mktemp -d)
-  ( cd "$TMP" && go mod init sbbuild >/dev/null 2>&1 && go get "github.com/sagernet/sing-box@v$SINGBOX_VERSION" )
+  # the temp module only pins sing-box; -mod=mod lets Go fill in sing-box's full dependency set
+  ( cd "$TMP" && go mod init sbbuild >/dev/null 2>&1 && GOFLAGS=-mod=mod go get "github.com/sagernet/sing-box@v$SINGBOX_VERSION" )
   for a in amd64 arm64; do
-    ( cd "$TMP" && GOOS=linux GOARCH=$a go build -trimpath \
+    ( cd "$TMP" && GOFLAGS=-mod=mod GOOS=linux GOARCH=$a go build -trimpath \
         -ldflags "$LDFLAGS -X github.com/sagernet/sing-box/constant.Version=$SINGBOX_VERSION" \
         -tags "with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_acme,with_clash_api,with_v2ray_api" \
         -o "$OUT/dist/sing-box-linux-$a" github.com/sagernet/sing-box/cmd/sing-box )
