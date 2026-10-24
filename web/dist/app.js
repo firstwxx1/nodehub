@@ -831,7 +831,7 @@ PAGES.ipq = async (el) => {
           <td>${c.native ? `<span class="pill ok">${icon('pin')} 原生 · ${esc(cn(c.geo_country))}</span>` : `<div class="cell-2"><span><span class="pill warn">广播</span></span><small>注册 ${esc(cn(c.reg_country))} → 使用 ${esc(cn(c.geo_country))}</small></div>`}</td>
           <td><span class="pill ok">${icon(ci)} ${ct}</span></td>
           <td>${c.dual_isp ? '<span class="pill ok">双 ISP</span>' : '<span class="muted">否</span>'}</td>
-          <td>${risks.length ? `<div class="row wrap" style="gap:4px">${risks.map((x) => `<span class="pill bad">${x[1]}</span>`).join('')}</div>` : '<span class="ok-t">无风险</span>'}</td>
+          <td>${risks.length ? `<div class="row wrap" style="gap:4px">${risks.map((x) => `<span class="pill bad">${x[1]}</span>`).join('')}</div>` : c.fraud_score >= 70 ? '<span class="bad-t" title="没有代理/VPN/滥用标记，但欺诈分很高：IP 段或所属机房信誉差">高风险</span>' : c.fraud_score >= 30 ? '<span class="warn-t" title="没有代理/VPN/滥用标记，欺诈分中等">中风险</span>' : '<span class="ok-t">无风险</span>'}</td>
           <td><span class="score ${c.fraud_score >= 70 ? 'hi' : c.fraud_score >= 30 ? 'mid' : 'lo'}" title="来源：${esc({ ipqs: 'IPQualityScore', scamalytics: 'Scamalytics', estimate: '估算（配置 IPQS / Scamalytics Key 可得到真实分数）' }[c.fraud_source] || c.fraud_source)}">${c.fraud_score}</span>${c.fraud_source === 'estimate' ? '<small class="faint"> 估</small>' : ''}</td>
           <td>${unlockPills(r.unlock)}</td>
           <td><div class="cell-2"><span>${esc(c.asn)}</span><small>${esc(c.org)}</small></div></td>
