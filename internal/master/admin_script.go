@@ -214,7 +214,30 @@ func (s *Server) handleScriptNodeAdopt(w http.ResponseWriter, r *http.Request, a
 // depend on the browser window staying open until the (sometimes minutes long) installation finishes.
 func (s *Server) afterScriptInstall(srv *store.Server, cmdID int64) {
 	c, err := s.st.GetCommand(cmdID)
-	if err != nil || c.Type != "install_hy2" || c.Status != "done" {
+	if err != nil || c.Status != "done" {
+		return
+	}
+	if c.Type == "scan_import" && strings.HasPrefix(c.Arg, "adopt:") {
+		var scan agent.ImportScan
+		if json.Unmarshal([]byte(c.Output), &scan) != nil {
+			return
+		}
+		nodes, _ := s.st.NodesByServer(srv.ID)
+		for _, n := range nodes {
+			if n.Core == "script" {
+				return
+			}
+		}
+		id, err := s.createScriptNode(srv, &scan, strings.TrimPrefix(c.Arg, "adopt:"), "")
+		if err != nil {
+			s.emit("node.script_failed", "warn", fmt.Sprintf("服务器 %s 上已有的原版脚本接入面板失败：%v", srv.Name, err), map[string]any{"server_id": srv.ID})
+			return
+		}
+		s.bump()
+		s.emit("node.script_created", "info", fmt.Sprintf("服务器 %s 上已有的原版脚本已接入面板（端口 %d）", srv.Name, scan.Port), map[string]any{"server_id": srv.ID, "node_id": id})
+		return
+	}
+	if c.Type != "install_hy2" {
 		return
 	}
 	var res agent.InstallResult

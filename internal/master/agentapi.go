@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"nodehub/internal/agent"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -276,7 +277,13 @@ func (s *Server) agentReport(w http.ResponseWriter, r *http.Request, srv *store.
 		s.st.FinishCommand(srv.ID, res)
 		if res.OK {
 			s.afterScriptInstall(srv, res.ID)
-		} else if c, err := s.st.GetCommand(res.ID); err == nil && c.Type == "install_hy2" {
+		} else if c, err := s.st.GetCommand(res.ID); err == nil && c.Type == "install_hy2" && strings.Contains(res.Output, "config.yaml 已存在") {
+			// the script is already installed on this VPS: take it over as it is instead of failing
+			var arg agent.InstallReq
+			_ = json.Unmarshal([]byte(c.Arg), &arg)
+			_, _ = s.st.QueueCommand(srv.ID, "scan_import", "adopt:"+arg.Name)
+			s.emit("node.script_adopting", "info", fmt.Sprintf("服务器 %s 上已经装过原版脚本，正在直接把它接入面板", srv.Name), map[string]any{"server_id": srv.ID})
+		} else if err == nil && c.Type == "install_hy2" {
 			out := res.Output
 			if i := strings.Index(out, "\n"); i > 0 {
 				out = out[:i]

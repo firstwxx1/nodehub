@@ -741,9 +741,16 @@ PAGES.nodes = async (el) => {
     servers = sv; panels = pv;
     const q = filter.q.toLowerCase();
     const rows = list.filter((n) => !q || [n.name, n.server_name, n.protocol, n.connect_addr, String(n.port), n.groups].join(' ').toLowerCase().includes(q));
+    let notes = '';
+    try {
+      const ev = (await api('GET', '/api/events?limit=40')).filter((e) => /^node\.script_/.test(e.type) && Date.now() / 1000 - e.created_at < 86400);
+      const seen = +store.get('script_ev_seen', 0);
+      notes = ev.filter((e) => e.id > seen).slice(0, 5).map((e) => `<div class="note ${e.level === 'warn' ? '' : 'info'}" style="margin-bottom:8px">${fmtTime(e.created_at)} · ${esc(e.message)}</div>`).join('');
+      if (notes) notes += `<div style="margin:-2px 0 12px"><button class="btn sm" data-act="evSeen" data-max="${Math.max(...ev.map((e) => e.id))}">知道了</button></div>`;
+    } catch (e) { /* events are optional */ }
     el.innerHTML = topbar('节点', `${list.filter((n) => n.enabled && n.server_online).length} / ${list.length} 运行中`,
       `<input class="inp search" id="nq" placeholder="搜索名称 / 服务器 / 端口" value="${esc(filter.q)}"><button class="btn" data-act="addAdv">高级节点</button><button class="btn primary" data-act="add">${icon('plus')}添加节点</button>`) +
-      (!list.length ? `<div class="card empty">${servers.length ? '还没有节点，点击「添加节点」。' : '请先在「服务器」页面添加一台服务器。'}</div>` :
+      notes + (!list.length ? `<div class="card empty">${servers.length ? '还没有节点，点击「添加节点」。' : '请先在「服务器」页面添加一台服务器。'}</div>` :
       `<div class="card tbl-wrap"><table class="tbl"><thead><tr><th>节点</th><th>服务器</th><th>协议</th><th>地址</th><th>用户</th><th>在线</th><th>累计流量</th><th>IP 质量</th><th>状态</th><th></th></tr></thead><tbody>
       ${rows.map((n) => `<tr data-id="${n.id}">
         <td><div class="cell-2"><b>${esc(n.name)}</b><small>${n.source === 'panel' ? `面板 · ${esc(n.panel_name || '')} #${n.panel_node_id}` : `本地${n.groups ? ' · ' + esc(n.groups) : ''}${n.rate !== 1 ? ' · ×' + n.rate : ''}`}</small></div></td>
@@ -782,6 +789,7 @@ PAGES.nodes = async (el) => {
       if (!servers.length) return toast('请先添加服务器', true);
       scriptFlow(servers, load);
     },
+    evSeen: (id, b) => { store.set('script_ev_seen', b.dataset.max); load(); },
     addAdv: () => {
       if (!servers.length) return toast('请先添加服务器', true);
       const m = modal('添加节点（NodeHub 内核：Xray / sing-box）', nodeForm({ server_id: servers[0].id }, servers, panels), { ok: save(null), wide: true, okText: '创建' });

@@ -462,3 +462,20 @@ func TestHy2ClientBandwidth(t *testing.T) {
 		t.Fatal("no bandwidth must be written when unset")
 	}
 }
+
+func TestScriptAdoptWhenAlreadyInstalled(t *testing.T) {
+	s, err := New(Options{DataDir: t.TempDir(), AdminPass: "test-pass-123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sid, _ := s.st.CreateServer(&store.Server{Name: "kamatera", PublicIPv4: "45.130.166.10", Enabled: true, TrafficResetDay: 1}, util.SHA256Hex(util.RandToken(24)))
+	cid, _ := s.st.QueueCommand(sid, "scan_import", "adopt:kamatera")
+	s.st.FinishCommand(sid, proto.CommandResult{ID: cid, OK: true, Output: `{"kind":"hysteria2-installer","port":443,"domain":"k.example.com","cert_mode":"acme","obfs_password":"o","hop_ports":"20000-40000","auth_password":"pw","users":[]}`})
+	srv, _ := s.st.GetServer(sid)
+	s.afterScriptInstall(srv, cid)
+	s.afterScriptInstall(srv, cid)
+	nodes, _ := s.st.NodesByServer(sid)
+	if len(nodes) != 1 || nodes[0].Name != "kamatera" || nodes[0].Core != "script" {
+		t.Fatalf("adopted node: %+v", nodes)
+	}
+}
