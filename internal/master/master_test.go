@@ -433,3 +433,14 @@ func TestScriptNodeAutoCreate(t *testing.T) {
 		t.Fatalf("auto-created node: %+v", nodes)
 	}
 }
+
+func TestClashRuleModes(t *testing.T) {
+	g := renderClash(nil, &store.User{}, "x", false)
+	if strings.Contains(g, "GEOSITE,CN") || strings.Contains(g, "GEOIP,CN") || !strings.Contains(g, "MATCH,") {
+		t.Fatalf("global mode must not send China sites direct:\n%s", g)
+	}
+	sm := renderClash(nil, &store.User{}, "x", true)
+	if !strings.Contains(sm, "GEOSITE,CN,DIRECT") || !strings.Contains(sm, "GEOIP,CN,DIRECT,no-resolve") {
+		t.Fatalf("smart mode rules missing:\n%s", sm)
+	}
+}

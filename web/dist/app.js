@@ -1025,7 +1025,7 @@ PAGES.settings = async (el) => {
   const section = (title, body, key) => `<div class="card" data-sec="${key}"><div class="card-h"><h3>${title}</h3><span class="spacer"></span><button class="btn primary sm" data-act="save">保存</button></div><div class="card-b"><div class="form">${body}</div></div></div>`;
   el.innerHTML = topbar('设置', '') + `<div class="grid" style="gap:14px">
     ${section('基本', `${inp('站点名称', 'site_name', s.site_name)}${inp('面板公开地址', 'public_url', s.public_url, { ph: 'https://nodes.example.com', hint: 'Agent 安装命令与订阅使用；留空则按访问地址' })}
-      ${inp('订阅域名', 'sub_url', s.sub_url, { ph: '留空同上', hint: '可单独给订阅一个域名，与后台分开' })}${inp('订阅节点名模板', 'sub_name_template', s.sub_name_template, { hint: '可用 {flag} {name} {region} {protocol} {rate}' })}
+      ${inp('订阅域名', 'sub_url', s.sub_url, { ph: '留空同上', hint: '可单独给订阅一个域名，与后台分开' })}${inp('订阅节点名模板', 'sub_name_template', s.sub_name_template, { hint: '可用 {flag} {name} {region} {protocol} {rate}' })}${inp('订阅分流规则', 'sub_rule_mode', s.sub_rule_mode || 'global', { opts: [['global', '全部走代理（和单独导入节点一样，最稳）'], ['smart', '国内直连、国外走代理（省流量，个别网站可能误判）']], hint: 'Clash / Surge 订阅使用；也可在订阅链接后加 ?rules=smart 或 ?rules=global 单独指定' })}
       ${inp('订阅「官网」链接', 'sub_support_url', s.sub_support_url, { full: true, ph: '客户端里显示的网站链接，可填商城地址' })}`, 'basic')}
     ${section('Agent 与监控', `${inp('Agent 上报间隔（秒）', 'report_interval', s.report_interval, { type: 'number' })}${inp('离线判定（秒无心跳）', 'offline_after', s.offline_after, { type: 'number' })}
       ${inp('流量明细保留天数', 'traffic_retention_days', s.traffic_retention_days, { type: 'number' })}${inp('VPS 到期提前提醒（天）', 'server_expire_remind_days', s.server_expire_remind_days || 3, { type: 'number' })}
