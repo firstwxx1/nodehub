@@ -564,6 +564,14 @@ func (s *Server) handleRunIPChecks(w http.ResponseWriter, r *http.Request, a *st
 		writeErr(w, 409, "检测正在进行中")
 		return
 	}
+	// the unlock column on the IP page comes from each server's own unlock test: refresh it as well
+	if list, err := s.st.ListServers(); err == nil {
+		for _, v := range list {
+			if v.Online {
+				_, _ = s.st.QueueCommand(v.ID, "unlock_test", "")
+			}
+		}
+	}
 	go func() {
 		defer s.ipcheckBusy.Store(false)
 		s.runIPChecks(context.Background(), 0)

@@ -453,9 +453,9 @@ async function adoptFlow(serverId, reload) {
 PAGES.servers = async (el) => {
   const load = async () => {
     const list = await api('GET', '/api/servers');
-    const head = topbar('服务器', `${list.filter((s) => s.online).length} / ${list.length} 在线`, `<button class="btn" data-act="cmdAll">${icon('refresh')}全部解锁检测</button><button class="btn primary" data-act="add">${icon('plus')}添加服务器</button>`);
+    const head = topbar('服务器', `${list.filter((s) => s.online).length} / ${list.length} 在线`, `<button class="btn primary" data-act="add">${icon('plus')}添加服务器</button>`);
     if (!list.length) { el.innerHTML = head + `<div class="card empty">还没有服务器。点击右上角「添加服务器」，在 VPS 上运行一条安装命令即可接入。</div>`; return; }
-    el.innerHTML = head + `<div class="card tbl-wrap"><table class="tbl"><thead><tr><th>服务器</th><th>状态</th><th>CPU</th><th>内存</th><th>磁盘</th><th>网速</th><th>本期流量</th><th>到期</th><th>Agent / 配置</th><th>流媒体与 AI 解锁</th><th></th></tr></thead><tbody>
+    el.innerHTML = head + `<div class="card tbl-wrap"><table class="tbl"><thead><tr><th>服务器</th><th>状态</th><th>CPU</th><th>内存</th><th>磁盘</th><th>网速</th><th>本期流量</th><th>到期</th><th>Agent / 配置</th><th></th></tr></thead><tbody>
     ${list.map((s) => {
       const st = s.status || {};
       const memP = st.mem_total ? st.mem_used / st.mem_total : 0;
@@ -474,7 +474,6 @@ PAGES.servers = async (el) => {
         <td><div class="cell-2"><span>${s.agent_version ? 'v' + esc(s.agent_version) : '<span class="faint">—</span>'} · ${s.node_count} 节点</span>
           <small title="${esc(s.apply_error)}" class="${cfgOk ? '' : 'bad-t'}">${s.last_seen ? (cfgOk ? '配置已同步 ' + esc((s.applied_version || '').slice(0, 6)) : '⚠ ' + esc((s.apply_error || '').slice(0, 40))) : ''}</small>
           <small>${st.core_versions ? Object.entries(st.core_versions).filter(([, v]) => v).map(([k, v]) => `${k === 'singbox' ? 'sing-box' : k} ${esc(v)}${st.core_running && st.core_running[k] ? '' : ' (停)'}`).join(' · ') : ''}</small></div></td>
-        <td>${unlockPills(s.unlock)}</td>
         <td>${menu([['edit', '编辑'], ['detail', '详情与命令记录'], ['adopt', '接入原版脚本节点'], ['import', '导入现有节点（由 NodeHub 接管）'], ['token', '重置令牌 / 安装命令'], ['cmd:restart_core', '重启内核'], ['cmd:reload', '重新下发配置'], ['cmd:unlock_test', '解锁检测'], ['cmd:upgrade_agent', '升级 Agent'], ['resetTraffic', '重置本期流量'], ['del', '删除', 'danger']])}</td>
       </tr>`;
     }).join('')}</tbody></table></div>`;
@@ -843,7 +842,7 @@ PAGES.ipq = async (el) => {
   };
   bind(el, {
     tab: (id, b) => { tab = b.dataset.tab; store.set('ipq_tab', tab); load(); },
-    runAll: async () => { await api('POST', '/api/ipchecks/run'); toast('已开始后台检测，每个 IP 约 2 秒'); load(); },
+    runAll: async () => { await api('POST', '/api/ipchecks/run'); toast('已开始后台检测（IP 质量 + 流媒体/AI 解锁），每个 IP 约 2 秒'); load(); },
     check: async (id, b) => { b.disabled = true; toast('检测中…'); await api('POST', ipcURL(id)); toast('检测完成'); load(); },
     raw: async (id) => {
       const { latest, history } = await api('GET', ipcURL(id));
