@@ -173,7 +173,7 @@ func (s *Server) normalizeNode(n *store.Node) error {
 		if err != nil {
 			return err
 		}
-		if n.Port >= lo && n.Port <= hi {
+		if n.Port >= lo && n.Port <= hi && n.Core != "script" { // the script redirects its own range to itself
 			return fmt.Errorf("主端口 %d 不能落在跳跃区间 %s 内", n.Port, st.HopPorts)
 		}
 		st.HopPorts = fmt.Sprintf("%d-%d", lo, hi)

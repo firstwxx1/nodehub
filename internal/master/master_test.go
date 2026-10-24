@@ -470,7 +470,7 @@ func TestScriptAdoptWhenAlreadyInstalled(t *testing.T) {
 	}
 	sid, _ := s.st.CreateServer(&store.Server{Name: "kamatera", PublicIPv4: "45.130.166.10", Enabled: true, TrafficResetDay: 1}, util.SHA256Hex(util.RandToken(24)))
 	cid, _ := s.st.QueueCommand(sid, "scan_import", "adopt:kamatera")
-	s.st.FinishCommand(sid, proto.CommandResult{ID: cid, OK: true, Output: `{"kind":"hysteria2-installer","port":443,"domain":"k.example.com","cert_mode":"acme","obfs_password":"o","hop_ports":"20000-40000","auth_password":"pw","users":[]}`})
+	s.st.FinishCommand(sid, proto.CommandResult{ID: cid, OK: true, Output: `{"kind":"hysteria2-installer","port":28443,"domain":"k.example.com","cert_mode":"acme","obfs_password":"o","hop_ports":"20000-40000","auth_password":"pw","users":[]}`})
 	srv, _ := s.st.GetServer(sid)
 	s.afterScriptInstall(srv, cid)
 	s.afterScriptInstall(srv, cid)
