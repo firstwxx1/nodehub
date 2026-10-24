@@ -267,3 +267,38 @@ func TestDefaultPortSkipsBusy(t *testing.T) {
 		t.Fatalf("want 443, got %d", got)
 	}
 }
+
+func TestIPChecksOneRowPerIP(t *testing.T) {
+	s, err := New(Options{DataDir: t.TempDir(), AdminPass: "test-pass-123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sid, _ := s.st.CreateServer(&store.Server{Name: "AWS-US", Host: "13.58.3.202", PublicIPv4: "13.58.3.202", Enabled: true, TrafficResetDay: 1}, util.SHA256Hex(util.RandToken(24)))
+	for i, p := range []string{"vless", "hysteria2"} {
+		n := &store.Node{ServerID: sid, Name: "n-" + p, Protocol: p, Port: 4443 + i, Enabled: true}
+		if err := s.normalizeNode(n); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.st.CreateNode(n); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w := httptest.NewRecorder()
+	s.handleListIPChecks(w, httptest.NewRequest("GET", "/api/ipchecks", nil), nil)
+	var res struct {
+		Data struct {
+			Items []ipRow `json:"items"`
+		} `json:"data"`
+		Items []ipRow `json:"items"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
+		t.Fatal(err, w.Body.String())
+	}
+	items := res.Items
+	if len(items) == 0 {
+		items = res.Data.Items
+	}
+	if len(items) != 1 || items[0].NodeName != "AWS-US" || len(items[0].Nodes) != 2 {
+		t.Fatalf("want 1 row titled by server with 2 nodes, got %+v", items)
+	}
+}

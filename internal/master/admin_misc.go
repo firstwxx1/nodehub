@@ -454,13 +454,15 @@ func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request, a *store.A
 
 type ipRow struct {
 	NodeID     int64          `json:"node_id"`
-	NodeName   string         `json:"node_name"`
+	NodeName   string         `json:"node_name"` // shown as the row title: the server name (or the node name when a node has its own egress IP)
 	ServerName string         `json:"server_name"`
+	Nodes      []string       `json:"nodes"` // every node that exits through this IP
 	Region     string         `json:"region"`
 	IP         string         `json:"ip"`
 	Check      *store.IPCheck `json:"check"`
 }
 
+// handleListIPChecks returns one row per egress IP, so several nodes on one server show up once.
 func (s *Server) handleListIPChecks(w http.ResponseWriter, r *http.Request, a *store.Admin) {
 	vs, err := s.nodeViews()
 	if err != nil {
@@ -473,14 +475,43 @@ func (s *Server) handleListIPChecks(w http.ResponseWriter, r *http.Request, a *s
 		sm[v.ID] = v
 	}
 	out := []ipRow{}
+	byIP := map[string]int{}
+	perServerIPs := map[int64]map[string]bool{}
 	for _, v := range vs {
 		srv := sm[v.ServerID]
-		row := ipRow{NodeID: v.ID, NodeName: v.Name, ServerName: v.ServerName, Check: v.IPCheck}
+		ip := ""
+		if srv != nil {
+			ip = s.egressIP(v.Node, srv)
+			if perServerIPs[srv.ID] == nil {
+				perServerIPs[srv.ID] = map[string]bool{}
+			}
+			perServerIPs[srv.ID][ip] = true
+		}
+		key := ip
+		if key == "" { // no IP known yet: keep the node visible on its own
+			key = fmt.Sprintf("node-%d", v.ID)
+		}
+		if i, seen := byIP[key]; seen {
+			out[i].Nodes = append(out[i].Nodes, v.Name)
+			if out[i].Check == nil && v.IPCheck != nil {
+				out[i].Check, out[i].NodeID = v.IPCheck, v.ID
+			}
+			continue
+		}
+		row := ipRow{NodeID: v.ID, NodeName: v.ServerName, ServerName: v.ServerName, Nodes: []string{v.Name}, IP: ip, Check: v.IPCheck}
 		if srv != nil {
 			row.Region = srv.Region
-			row.IP = s.egressIP(v.Node, srv)
 		}
+		byIP[key] = len(out)
 		out = append(out, row)
+	}
+	// a server with several distinct egress IPs (e.g. landing machines): tell the rows apart by node name
+	for i := range out {
+		for _, v := range vs {
+			if v.ID == out[i].NodeID && len(perServerIPs[v.ServerID]) > 1 {
+				out[i].NodeName = v.ServerName + " · " + v.Name
+			}
+		}
 	}
 	ok(w, map[string]any{"items": out, "running": s.ipcheckBusy.Load()})
 }
