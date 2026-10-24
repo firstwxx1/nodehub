@@ -55,6 +55,21 @@ func (s *Server) handleScriptNodeInstall(w http.ResponseWriter, r *http.Request,
 		writeErr(w, 400, "选择域名证书时必须填写域名（域名要先解析到这台服务器，并放行 TCP 80）")
 		return
 	}
+	// the installer refuses ACME without an email: fall back to the last one used, then to admin@<domain>
+	req.Email = strings.TrimSpace(req.Email)
+	if req.CertType == 3 {
+		if req.Email == "" {
+			req.Email = s.st.Setting("acme_email")
+		}
+		if req.Email == "" {
+			parts := strings.Split(strings.TrimSpace(req.Domain), ".")
+			if len(parts) >= 2 {
+				req.Email = "admin@" + strings.Join(parts[len(parts)-2:], ".")
+			}
+		} else {
+			_ = s.st.SetSetting("acme_email", req.Email)
+		}
+	}
 	arg, _ := json.Marshal(agent.InstallReq{URL: s.st.Setting("installer_url"), Port: req.Port, CertType: req.CertType,
 		Domain: strings.TrimSpace(req.Domain), Email: strings.TrimSpace(req.Email)})
 	id, err := s.st.QueueCommand(srv.ID, "install_hy2", string(arg))
