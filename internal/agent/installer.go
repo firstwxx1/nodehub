@@ -111,7 +111,7 @@ func InstallHy2(arg string) (string, error) {
 		return "", errors.New("ACME 需要有效的域名")
 	}
 	if _, err := os.Stat(hy2Dir + "/config.yaml"); err == nil {
-		return "", errors.New("这台服务器上已经安装了 hysteria2-installer（/etc/hysteria/config.yaml 已存在），请改用「导入现有节点」")
+		return "", errors.New("这台服务器上已经安装了 hysteria2-installer（/etc/hysteria/config.yaml 已存在），请在服务器菜单里用「接入原版脚本节点」把它收进面板；如要按新参数重装，先删除/卸载旧的")
 	}
 	script, err := fetchInstaller(req.URL)
 	if err != nil {
