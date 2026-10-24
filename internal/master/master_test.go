@@ -444,3 +444,21 @@ func TestClashRuleModes(t *testing.T) {
 		t.Fatalf("smart mode rules missing:\n%s", sm)
 	}
 }
+
+func TestHy2ClientBandwidth(t *testing.T) {
+	n := &store.Node{Name: "h", Protocol: "hysteria2", Core: "script", Port: 443}
+	n.Settings.SNI, n.Settings.SharedPassword = "a.example.com", "pw"
+	sn := subNode{Node: n, Name: "h", Addr: "1.2.3.4", UpMbps: 20, DownMbps: 80}
+	p := clashProxy(sn, &store.User{})
+	if p["up"] != "20 Mbps" || p["down"] != "80 Mbps" {
+		t.Fatalf("clash bandwidth: %v", p)
+	}
+	o := singboxOutbound(sn, &store.User{})
+	if o["up_mbps"] != 20 || o["down_mbps"] != 80 {
+		t.Fatalf("sing-box bandwidth: %v", o)
+	}
+	sn.UpMbps, sn.DownMbps = 0, 0
+	if _, ok := clashProxy(sn, &store.User{})["down"]; ok {
+		t.Fatal("no bandwidth must be written when unset")
+	}
+}

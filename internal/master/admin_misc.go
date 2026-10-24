@@ -375,7 +375,7 @@ func (s *Server) handleTestWebhook(w http.ResponseWriter, r *http.Request, a *st
 // ---------------- settings ----------------
 
 var editableSettings = map[string]bool{
-	"site_name": true, "public_url": true, "sub_url": true, "sub_name_template": true, "sub_support_url": true, "sub_rule_mode": true,
+	"site_name": true, "public_url": true, "sub_url": true, "sub_name_template": true, "sub_support_url": true, "sub_rule_mode": true, "sub_hy2_up_mbps": true, "sub_hy2_down_mbps": true,
 	"ipcheck_interval_hours": true, "unlock_interval_hours": true, "report_interval": true, "offline_after": true,
 	"traffic_retention_days": true, "agent_insecure_tls": true,
 	"ipcheck_ipqs_key": true, "ipcheck_ipinfo_token": true, "ipcheck_ipapiis_key": true, "ipcheck_scamalytics_url": true,

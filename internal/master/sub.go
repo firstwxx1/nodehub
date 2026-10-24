@@ -26,6 +26,8 @@ type subNode struct {
 	Name    string
 	Addr    string
 	Country string
+	// client bandwidth for hysteria2 (Mbps): >0 makes the server use Brutal instead of BBR
+	UpMbps, DownMbps int
 }
 
 func flagEmoji(cc string) string {
@@ -46,6 +48,8 @@ func (s *Server) userNodes(u *store.User) []subNode {
 	}
 	checks, _ := s.st.LatestIPChecks()
 	tpl := s.st.SettingOr("sub_name_template", "{flag} {name}")
+	upM, _ := strconv.Atoi(s.st.Setting("sub_hy2_up_mbps"))
+	downM, _ := strconv.Atoi(s.st.Setting("sub_hy2_down_mbps"))
 	var out []subNode
 	for _, n := range nodes {
 		srv := sm[n.ServerID]
@@ -60,7 +64,11 @@ func (s *Server) userNodes(u *store.User) []subNode {
 		}
 		name := strings.NewReplacer("{flag}", flagEmoji(cc), "{name}", n.Name, "{region}", srv.Region, "{protocol}", n.Protocol,
 			"{rate}", strconv.FormatFloat(n.Rate, 'f', -1, 64)).Replace(tpl)
-		out = append(out, subNode{Node: n, Name: strings.TrimSpace(name), Addr: s.connectAddr(n, srv), Country: cc})
+		sn := subNode{Node: n, Name: strings.TrimSpace(name), Addr: s.connectAddr(n, srv), Country: cc}
+		if n.Protocol == "hysteria2" && upM > 0 && downM > 0 {
+			sn.UpMbps, sn.DownMbps = upM, downM
+		}
+		out = append(out, sn)
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Node.Sort < out[j].Node.Sort })
 	uniqueNames(out)
@@ -331,6 +339,9 @@ func clashProxy(sn subNode, u *store.User) map[string]any {
 			p["obfs"] = "salamander"
 			p["obfs-password"] = st.ObfsPassword
 		}
+		if sn.DownMbps > 0 {
+			p["up"], p["down"] = fmt.Sprintf("%d Mbps", sn.UpMbps), fmt.Sprintf("%d Mbps", sn.DownMbps)
+		}
 	case "tuic":
 		p["type"] = "tuic"
 		p["uuid"] = u.UUID
@@ -497,6 +508,9 @@ func singboxOutbound(sn subNode, u *store.User) map[string]any {
 		if st.Obfs == "salamander" {
 			o["obfs"] = map[string]any{"type": "salamander", "password": st.ObfsPassword}
 		}
+		if sn.DownMbps > 0 {
+			o["up_mbps"], o["down_mbps"] = sn.UpMbps, sn.DownMbps
+		}
 	case "tuic":
 		o["type"], o["uuid"], o["password"] = "tuic", u.UUID, sn.pw(u)
 		o["congestion_control"] = orStr(st.Congestion, "bbr")
@@ -579,7 +593,11 @@ func surgeLine(sn subNode, u *store.User) string {
 		if st.HopPorts != "" {
 			hop = ", port-hopping=" + st.HopPorts + ", port-hopping-interval=30"
 		}
-		return base + fmt.Sprintf("hysteria2, %s, %d, password=%s, sni=%s", sn.Addr, n.Port, sn.pw(u), st.SNI) + hop + skip
+		bw := ""
+		if sn.DownMbps > 0 {
+			bw = fmt.Sprintf(", download-bandwidth=%d", sn.DownMbps)
+		}
+		return base + fmt.Sprintf("hysteria2, %s, %d, password=%s, sni=%s", sn.Addr, n.Port, sn.pw(u), st.SNI) + hop + bw + skip
 	case "tuic":
 		return base + fmt.Sprintf("tuic-v5, %s, %d, uuid=%s, password=%s, sni=%s, alpn=h3", sn.Addr, n.Port, u.UUID, sn.pw(u), st.SNI) + skip
 	case "anytls":
