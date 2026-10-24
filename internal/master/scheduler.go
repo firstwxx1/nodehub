@@ -192,7 +192,13 @@ func (s *Server) egressIP(n *store.Node, srv *store.Server) string {
 }
 
 // runIPChecks checks one node (nodeID>0) or all nodes; each distinct IP is queried once.
-func (s *Server) runIPChecks(ctx context.Context, nodeID int64) {
+// runIPChecks checks every node's egress IP (nodeID/serverID = 0) or just one node / one node-less server.
+// Servers without any node are checked too (stored with node_id = 0) so every VPS shows up on the IP page.
+func (s *Server) runIPChecks(ctx context.Context, nodeID int64, serverIDs ...int64) {
+	onlyServer := int64(0)
+	if len(serverIDs) > 0 {
+		onlyServer = serverIDs[0]
+	}
 	nodes, err := s.st.ListNodes()
 	if err != nil {
 		return
@@ -205,8 +211,12 @@ func (s *Server) runIPChecks(ctx context.Context, nodeID int64) {
 	prev, _ := s.st.LatestIPChecks()
 	cache := map[string]*ipcheck.Result{}
 	keys := s.ipKeys()
+	hasNode := map[int64]bool{}
 	for _, n := range nodes {
-		if nodeID > 0 && n.ID != nodeID {
+		hasNode[n.ServerID] = true
+	}
+	for _, n := range nodes {
+		if onlyServer > 0 || nodeID > 0 && n.ID != nodeID {
 			continue
 		}
 		srv := sm[n.ServerID]
@@ -241,6 +251,38 @@ func (s *Server) runIPChecks(ctx context.Context, nodeID int64) {
 		if p := prev[n.ID]; p != nil && c.Error == "" && (p.Risky() != c.Risky() || p.Native != c.Native || p.IP != c.IP) {
 			s.emit("ipcheck.risk_changed", "warn", fmt.Sprintf("节点 %s IP 质量变化：风险 %v→%v，原生 %v→%v，欺诈分 %d→%d",
 				n.Name, p.Risky(), c.Risky(), p.Native, c.Native, p.FraudScore, c.FraudScore), map[string]any{"node_id": n.ID, "ip": ip})
+		}
+	}
+	if nodeID > 0 {
+		return
+	}
+	for _, srv := range servers {
+		if hasNode[srv.ID] || onlyServer > 0 && srv.ID != onlyServer {
+			continue
+		}
+		ip := s.egressIP(&store.Node{}, srv)
+		if ip == "" {
+			continue
+		}
+		res := cache[ip]
+		if res == nil {
+			res = ipcheck.Check(ctx, ip, keys)
+			cache[ip] = res
+			time.Sleep(1500 * time.Millisecond)
+		}
+		raw, _ := json.Marshal(map[string]any{"sources": res.Sources, "errors": res.Errors})
+		c := &store.IPCheck{ServerID: srv.ID, IP: ip, Native: res.Native, RegCountry: res.RegCountry, GeoCountry: res.GeoCountry,
+			GeoCity: res.GeoCity, ConnType: res.ConnType, DualISP: res.DualISP, IsProxy: res.IsProxy, IsVPN: res.IsVPN, IsTor: res.IsTor,
+			IsAbuse: res.IsAbuse, IsHosting: res.IsHosting, FraudScore: res.FraudScore, FraudSource: res.FraudSource, ASN: res.ASN, Org: res.Org,
+			Raw: raw, CheckedAt: time.Now().Unix()}
+		if len(res.Sources) == 0 {
+			c.Error = "所有数据源都失败了"
+			for k, v := range res.Errors {
+				c.Error += "; " + k + ": " + v
+			}
+		}
+		if _, err := s.st.SaveIPCheck(c); err != nil {
+			log.Printf("save ip check: %v", err)
 		}
 	}
 }

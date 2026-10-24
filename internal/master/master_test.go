@@ -391,3 +391,27 @@ func TestScriptNode(t *testing.T) {
 		}
 	}
 }
+
+func TestIPChecksListNodelessServers(t *testing.T) {
+	s, err := New(Options{DataDir: t.TempDir(), AdminPass: "test-pass-123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.st.CreateServer(&store.Server{Name: "with-node", PublicIPv4: "1.1.1.1", Enabled: true, TrafficResetDay: 1}, util.SHA256Hex(util.RandToken(24)))
+	s2, _ := s.st.CreateServer(&store.Server{Name: "empty", PublicIPv4: "2.2.2.2", Enabled: true, TrafficResetDay: 1}, util.SHA256Hex(util.RandToken(24)))
+	n := &store.Node{ServerID: 1, Name: "n", Protocol: "vless", Port: 443, Enabled: true}
+	if err := s.normalizeNode(n); err != nil {
+		t.Fatal(err)
+	}
+	s.st.CreateNode(n)
+	s.st.SaveIPCheck(&store.IPCheck{ServerID: s2, IP: "2.2.2.2", FraudScore: 7, CheckedAt: time.Now().Unix()})
+	w := httptest.NewRecorder()
+	s.handleListIPChecks(w, httptest.NewRequest("GET", "/api/ipchecks", nil), nil)
+	var res struct {
+		Items []ipRow `json:"items"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &res)
+	if len(res.Items) != 2 || res.Items[1].NodeName != "empty" || res.Items[1].ServerID != s2 || res.Items[1].Check == nil || res.Items[1].Check.FraudScore != 7 {
+		t.Fatalf("want node-less server row with its check, got %s", w.Body.String())
+	}
+}

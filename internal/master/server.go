@@ -238,6 +238,8 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /api/ipchecks", s.admin(s.handleListIPChecks))
 	m.HandleFunc("POST /api/ipchecks/run", s.admin(s.handleRunIPChecks))
 	m.HandleFunc("POST /api/nodes/{id}/ipcheck", s.admin(s.handleNodeIPCheck))
+	m.HandleFunc("POST /api/servers/{id}/ipcheck", s.admin(s.handleServerIPCheck))
+	m.HandleFunc("GET /api/servers/{id}/ipcheck", s.admin(s.handleServerIPCheckDetail))
 	m.HandleFunc("GET /api/nodes/{id}/ipcheck", s.admin(s.handleNodeIPCheckDetail))
 
 	// admin: users

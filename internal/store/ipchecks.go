@@ -110,3 +110,47 @@ func (s *Store) IPCheckHistory(nodeID int64, limit int) ([]*IPCheck, error) {
 	}
 	return out, rows.Err()
 }
+
+// Server-level checks (node_id = 0) cover servers that have no nodes yet.
+
+func (s *Store) LatestServerIPChecks() (map[int64]*IPCheck, error) {
+	rows, err := s.DB.Query(`SELECT ` + ipCols + ` FROM ip_checks WHERE id IN (SELECT MAX(id) FROM ip_checks WHERE node_id=0 GROUP BY server_id)`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64]*IPCheck{}
+	for rows.Next() {
+		c, err := scanIP(rows, false)
+		if err != nil {
+			return nil, err
+		}
+		out[c.ServerID] = c
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) LatestServerIPCheck(serverID int64) (*IPCheck, error) {
+	c, err := scanIP(s.DB.QueryRow(`SELECT `+ipCols+` FROM ip_checks WHERE node_id=0 AND server_id=? ORDER BY id DESC LIMIT 1`, serverID), true)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return c, err
+}
+
+func (s *Store) ServerIPCheckHistory(serverID int64, limit int) ([]*IPCheck, error) {
+	rows, err := s.DB.Query(`SELECT `+ipCols+` FROM ip_checks WHERE node_id=0 AND server_id=? ORDER BY id DESC LIMIT ?`, serverID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*IPCheck
+	for rows.Next() {
+		c, err := scanIP(rows, false)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}

@@ -806,6 +806,7 @@ PAGES.nodes = async (el) => {
 
 // ---------- IP quality ----------
 const CONN = { datacenter: ['机房', 'dc'], residential: ['家宽', 'home'], mobile: ['移动', 'phone'], business: ['企业', 'biz'], unknown: ['未知', 'dc'] };
+const ipcURL = (id) => (String(id).startsWith('s') ? `/api/servers/${String(id).slice(1)}/ipcheck` : `/api/nodes/${id}/ipcheck`);
 PAGES.ipq = async (el) => {
   let tab = store.get('ipq_tab', 'all');
   const load = async () => {
@@ -823,10 +824,10 @@ PAGES.ipq = async (el) => {
       <div class="card tbl-wrap"><table class="tbl"><thead><tr><th>服务器 / IP</th><th>原生 IP</th><th>连接类型</th><th>双 ISP</th><th>风险标记</th><th>欺诈分</th><th>解锁（从该服务器访问）</th><th>ASN / 归属</th><th>检测时间</th><th></th></tr></thead><tbody>
       ${rows.length ? rows.map((r) => {
         const c = r.check;
-        if (!c || c.error) return `<tr data-id="${r.node_id}"><td><div class="cell-2"><b>${esc(r.node_name)}</b><small class="mono">${esc(r.ip || '—')}</small></div></td><td colspan="8" class="${c ? 'bad-t' : 'faint'}">${c ? '检测失败：' + esc(c.error.slice(0, 120)) : '未检测'}</td><td><button class="btn icon sm" data-act="check" title="检测" aria-label="检测">${icon('refresh')}</button></td></tr>`;
+        if (!c || c.error) return `<tr data-id="${r.node_id || 's' + r.server_id}"><td><div class="cell-2"><b>${esc(r.node_name)}</b><small class="mono">${esc(r.ip || '—')}</small></div></td><td colspan="8" class="${c ? 'bad-t' : 'faint'}">${c ? '检测失败：' + esc(c.error.slice(0, 120)) : '未检测'}</td><td><button class="btn icon sm" data-act="check" title="检测" aria-label="检测">${icon('refresh')}</button></td></tr>`;
         const risks = [[c.is_proxy, '代理'], [c.is_vpn, 'VPN'], [c.is_abuse, '滥用'], [c.is_tor, 'Tor']].filter((x) => x[0]);
         const [ct, ci] = CONN[c.conn_type] || CONN.unknown;
-        return `<tr data-id="${r.node_id}">
+        return `<tr data-id="${r.node_id || 's' + r.server_id}">
           <td><div class="cell-2"><b>${esc(r.node_name)}</b><small class="mono" title="${esc((r.nodes || []).join('、'))}">${esc(c.ip)}</small></div></td>
           <td>${c.native ? `<span class="pill ok">${icon('pin')} 原生 · ${esc(cn(c.geo_country))}</span>` : `<div class="cell-2"><span><span class="pill warn">广播</span></span><small>注册 ${esc(cn(c.reg_country))} → 使用 ${esc(cn(c.geo_country))}</small></div>`}</td>
           <td><span class="pill ok">${icon(ci)} ${ct}</span></td>
@@ -843,9 +844,9 @@ PAGES.ipq = async (el) => {
   bind(el, {
     tab: (id, b) => { tab = b.dataset.tab; store.set('ipq_tab', tab); load(); },
     runAll: async () => { await api('POST', '/api/ipchecks/run'); toast('已开始后台检测，每个 IP 约 2 秒'); load(); },
-    check: async (id, b) => { b.disabled = true; toast('检测中…'); await api('POST', `/api/nodes/${id}/ipcheck`); toast('检测完成'); load(); },
+    check: async (id, b) => { b.disabled = true; toast('检测中…'); await api('POST', ipcURL(id)); toast('检测完成'); load(); },
     raw: async (id) => {
-      const { latest, history } = await api('GET', `/api/nodes/${id}/ipcheck`);
+      const { latest, history } = await api('GET', ipcURL(id));
       modal('IP 检测详情 · ' + latest.ip, `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>时间</th><th>原生</th><th>类型</th><th>风险</th><th>欺诈分</th></tr></thead><tbody>${history.map((h) => `<tr><td>${fmtTime(h.checked_at)}</td><td>${h.native ? '原生' : '广播'} ${esc(h.reg_country)}→${esc(h.geo_country)}</td><td>${esc((CONN[h.conn_type] || CONN.unknown)[0])}</td><td>${[h.is_proxy && '代理', h.is_vpn && 'VPN', h.is_abuse && '滥用', h.is_tor && 'Tor'].filter(Boolean).join(' / ') || '无'}</td><td>${h.fraud_score}</td></tr>`).join('')}</tbody></table></div>
         <h4 style="margin:16px 0 6px">各数据源原始返回</h4><div class="codebox" style="max-height:340px;overflow:auto">${esc(JSON.stringify(latest.raw, null, 2))}</div>`, { wide: true, cancelText: '关闭' });
     },

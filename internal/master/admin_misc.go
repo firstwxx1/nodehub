@@ -454,6 +454,7 @@ func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request, a *store.A
 
 type ipRow struct {
 	NodeID     int64           `json:"node_id"`
+	ServerID   int64           `json:"server_id"`
 	NodeName   string          `json:"node_name"` // shown as the row title: the server name (or the node name when a node has its own egress IP)
 	ServerName string          `json:"server_name"`
 	Nodes      []string        `json:"nodes"` // every node that exits through this IP
@@ -499,7 +500,7 @@ func (s *Server) handleListIPChecks(w http.ResponseWriter, r *http.Request, a *s
 			}
 			continue
 		}
-		row := ipRow{NodeID: v.ID, NodeName: v.ServerName, ServerName: v.ServerName, Nodes: []string{v.Name}, IP: ip, Check: v.IPCheck}
+		row := ipRow{NodeID: v.ID, ServerID: v.ServerID, NodeName: v.ServerName, ServerName: v.ServerName, Nodes: []string{v.Name}, IP: ip, Check: v.IPCheck}
 		if srv != nil {
 			row.Region = srv.Region
 			if json.Valid(srv.Unlock) && len(srv.Unlock) > 2 {
@@ -517,7 +518,45 @@ func (s *Server) handleListIPChecks(w http.ResponseWriter, r *http.Request, a *s
 			}
 		}
 	}
+	// servers without any node still get a row (their checks are stored with node_id = 0)
+	sc, _ := s.st.LatestServerIPChecks()
+	for _, srv := range servers {
+		if perServerIPs[srv.ID] != nil {
+			continue
+		}
+		row := ipRow{ServerID: srv.ID, NodeName: srv.Name, ServerName: srv.Name, Nodes: []string{}, Region: srv.Region,
+			IP: s.egressIP(&store.Node{}, srv), Check: sc[srv.ID]}
+		if json.Valid(srv.Unlock) && len(srv.Unlock) > 2 {
+			row.Unlock = srv.Unlock
+		}
+		out = append(out, row)
+	}
 	ok(w, map[string]any{"items": out, "running": s.ipcheckBusy.Load()})
+}
+
+func (s *Server) handleServerIPCheck(w http.ResponseWriter, r *http.Request, a *store.Admin) {
+	id := pathID(r)
+	if _, err := s.st.GetServer(id); err != nil {
+		notFoundOr500(w, err)
+		return
+	}
+	s.runIPChecks(r.Context(), 0, id)
+	c, err := s.st.LatestServerIPCheck(id)
+	if err != nil {
+		writeErr(w, 502, "检测失败（这台服务器已有节点时请在节点行检测）："+err.Error())
+		return
+	}
+	ok(w, c)
+}
+
+func (s *Server) handleServerIPCheckDetail(w http.ResponseWriter, r *http.Request, a *store.Admin) {
+	c, err := s.st.LatestServerIPCheck(pathID(r))
+	if err != nil {
+		notFoundOr500(w, err)
+		return
+	}
+	hist, _ := s.st.ServerIPCheckHistory(pathID(r), 20)
+	ok(w, map[string]any{"latest": c, "history": hist})
 }
 
 func (s *Server) handleRunIPChecks(w http.ResponseWriter, r *http.Request, a *store.Admin) {
