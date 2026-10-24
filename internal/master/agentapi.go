@@ -276,6 +276,13 @@ func (s *Server) agentReport(w http.ResponseWriter, r *http.Request, srv *store.
 		s.st.FinishCommand(srv.ID, res)
 		if res.OK {
 			s.afterScriptInstall(srv, res.ID)
+		} else if c, err := s.st.GetCommand(res.ID); err == nil && c.Type == "install_hy2" {
+			out := res.Output
+			if i := strings.Index(out, "\n"); i > 0 {
+				out = out[:i]
+			}
+			s.emit("node.script_failed", "warn", fmt.Sprintf("服务器 %s 安装原版脚本失败：%s（完整日志见 服务器 → 详情与命令记录）", srv.Name, out),
+				map[string]any{"server_id": srv.ID, "command_id": res.ID})
 		}
 	}
 	if rep.Unlock != nil {

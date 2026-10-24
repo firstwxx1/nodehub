@@ -128,12 +128,22 @@ func InstallHy2(arg string) (string, error) {
 		if req.Email != "" {
 			env = append(env, "HY2_EMAIL="+req.Email)
 		}
-		if req.CFToken != "" && req.CFEmail != "" {
-			env = append(env, "HY2_CF_TOKEN="+req.CFToken, "HY2_CF_EMAIL="+req.CFEmail)
+	}
+	pre := ""
+	// With a Cloudflare token the certificate is issued by DNS-01 first (acme.sh), so it works even when TCP 80/443
+	// are taken by nginx & co.; the script then reuses that certificate. Without a token, or if it fails, the
+	// script's own ACME (HTTP-01) runs as before.
+	if req.CertType == 3 && req.CFToken != "" {
+		cert, key, l, err := issueCertDNS(req.Domain, req.Email, req.CFToken)
+		pre = l
+		if err == nil {
+			env = append(env, "HY2_CUSTOM_CERT_FILE="+cert, "HY2_CUSTOM_KEY_FILE="+key, "HY2_CUSTOM_INSECURE=false")
+		} else {
+			pre += "\nDNS 验证签发失败，改用脚本自带的 HTTP 验证: " + err.Error()
 		}
 	}
 	out, runErr := runInstaller(script, "install", env, 20*time.Minute)
-	log := tailLog(out, 3500)
+	log := tailLog(append([]byte(pre+"\n"), out...), 3500)
 	if runErr != nil {
 		return "", fmt.Errorf("安装脚本失败: %v\n%s", runErr, log)
 	}
@@ -168,4 +178,44 @@ func UninstallHy2(url string) (string, error) {
 		return log, fmt.Errorf("卸载脚本失败: %v", err)
 	}
 	return log, nil
+}
+
+// issueCertDNS gets a Let's Encrypt certificate for domain through Cloudflare DNS-01 with acme.sh and installs it
+// to /etc/hy2-cert (acme.sh renews it by cron and restarts hysteria-server afterwards).
+func issueCertDNS(domain, email, cfToken string) (cert, key, log string, err error) {
+	acme := "/root/.acme.sh/acme.sh"
+	var buf strings.Builder
+	run := func(timeout time.Duration, env []string, name string, args ...string) error {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		c := exec.CommandContext(ctx, name, args...)
+		c.Env = append(os.Environ(), env...)
+		out, err := c.CombinedOutput()
+		buf.WriteString(tailLog(out, 600) + "\n")
+		return err
+	}
+	if _, e := os.Stat(acme); e != nil {
+		if email == "" {
+			email = "admin@" + domain
+		}
+		if e := run(3*time.Minute, nil, "sh", "-c", "curl -fsSL https://get.acme.sh | sh -s email="+email); e != nil {
+			return "", "", buf.String(), fmt.Errorf("安装 acme.sh 失败: %v", e)
+		}
+	}
+	env := []string{"CF_Token=" + cfToken, "HOME=/root"}
+	// exit code 2 = cert exists and is not due for renewal: fine
+	if e := run(5*time.Minute, env, acme, "--issue", "--dns", "dns_cf", "-d", domain, "--server", "letsencrypt", "--keylength", "ec-256"); e != nil {
+		if ee, ok := e.(*exec.ExitError); !ok || ee.ExitCode() != 2 {
+			return "", "", buf.String(), fmt.Errorf("acme.sh 签发失败: %v", e)
+		}
+	}
+	if e := os.MkdirAll("/etc/hy2-cert", 0o700); e != nil {
+		return "", "", buf.String(), e
+	}
+	cert, key = "/etc/hy2-cert/fullchain.pem", "/etc/hy2-cert/privkey.pem"
+	if e := run(time.Minute, env, acme, "--install-cert", "-d", domain, "--ecc", "--fullchain-file", cert, "--key-file", key,
+		"--reloadcmd", "systemctl restart hysteria-server 2>/dev/null || true"); e != nil {
+		return "", "", buf.String(), fmt.Errorf("安装证书失败: %v", e)
+	}
+	return cert, key, "已通过 Cloudflare DNS 验证签发证书 " + domain, nil
 }

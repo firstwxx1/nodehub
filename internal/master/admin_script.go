@@ -72,7 +72,11 @@ func (s *Server) handleScriptNodeInstall(w http.ResponseWriter, r *http.Request,
 			_ = s.st.SetSetting("acme_email", req.Email)
 		}
 	}
-	arg, _ := json.Marshal(agent.InstallReq{URL: s.st.Setting("installer_url"), Port: req.Port, CertType: req.CertType,
+	cfTok := ""
+	if req.CertType == 3 {
+		cfTok = s.st.Setting("cf_api_token") // DNS-01 first, so busy TCP 80/443 (nginx) do not matter
+	}
+	arg, _ := json.Marshal(agent.InstallReq{CFToken: cfTok, URL: s.st.Setting("installer_url"), Port: req.Port, CertType: req.CertType,
 		Domain: strings.TrimSpace(req.Domain), Email: req.Email, Name: strings.TrimSpace(req.Name), Groups: req.Groups})
 	id, err := s.st.QueueCommand(srv.ID, "install_hy2", string(arg))
 	if err != nil {

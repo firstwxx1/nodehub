@@ -3,6 +3,7 @@ package master
 import (
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 
 	"nodehub/internal/store"
@@ -164,6 +165,7 @@ func (s *Server) handleServerCommands(w http.ResponseWriter, r *http.Request, a 
 		if list[i].Type == "scan_import" && list[i].Status == "done" {
 			list[i].Output = "（扫描结果含密码，已隐藏；在「导入现有节点」里查看）"
 		}
+		list[i].Arg = cfTokenRe.ReplaceAllString(list[i].Arg, `"cf_token":"***"`)
 	}
 	ok(w, list)
 }
@@ -176,3 +178,5 @@ func (s *Server) handleServerResetTraffic(w http.ResponseWriter, r *http.Request
 	s.audit(r, a, "server.reset_traffic", fmt.Sprint(pathID(r)), "")
 	ok(w, map[string]any{"ok": true})
 }
+
+var cfTokenRe = regexp.MustCompile(`"cf_token":"[^"]*"`)
