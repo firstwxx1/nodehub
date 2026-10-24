@@ -328,3 +328,21 @@ func TestSamePortDifferentTransport(t *testing.T) {
 		t.Fatalf("second tcp 443 must be refused naming the node, got %v", err)
 	}
 }
+
+func TestUniqueNames(t *testing.T) {
+	mk := func(name, proto string) subNode { return subNode{Name: name, Node: &store.Node{Protocol: proto}} }
+	l := []subNode{mk("US", "vless"), mk("US", "hysteria2"), mk("JP", "vless"), mk("DE", "vless"), mk("DE", "vless")}
+	uniqueNames(l)
+	got := []string{}
+	seen := map[string]bool{}
+	for _, n := range l {
+		got = append(got, n.Name)
+		if seen[n.Name] {
+			t.Fatalf("duplicate name %q in %v", n.Name, got)
+		}
+		seen[n.Name] = true
+	}
+	if l[0].Name != "US VLESS" || l[1].Name != "US Hysteria2" || l[2].Name != "JP" {
+		t.Fatalf("unexpected names %v", got)
+	}
+}

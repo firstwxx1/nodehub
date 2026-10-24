@@ -63,7 +63,34 @@ func (s *Server) userNodes(u *store.User) []subNode {
 		out = append(out, subNode{Node: n, Name: strings.TrimSpace(name), Addr: s.connectAddr(n, srv), Country: cc})
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Node.Sort < out[j].Node.Sort })
+	uniqueNames(out)
 	return out
+}
+
+var protoLabels = map[string]string{"vless": "VLESS", "vmess": "VMess", "trojan": "Trojan", "shadowsocks": "SS", "hysteria2": "Hysteria2", "tuic": "TUIC", "anytls": "AnyTLS"}
+
+// uniqueNames makes display names unique: Clash, sing-box and Surge reject duplicate proxy names.
+// Clashing names first get the protocol appended, then a counter if that still collides.
+func uniqueNames(l []subNode) {
+	count := map[string]int{}
+	for _, n := range l {
+		count[n.Name]++
+	}
+	for i := range l {
+		if count[l[i].Name] > 1 {
+			if lb := protoLabels[l[i].Node.Protocol]; lb != "" {
+				l[i].Name += " " + lb
+			}
+		}
+	}
+	seen := map[string]int{}
+	for i := range l {
+		base := l[i].Name
+		seen[base]++
+		if seen[base] > 1 {
+			l[i].Name = fmt.Sprintf("%s %d", base, seen[base])
+		}
+	}
 }
 
 func hostPort(h string, p int) string { return net.JoinHostPort(h, strconv.Itoa(p)) }
