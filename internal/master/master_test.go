@@ -3,6 +3,7 @@ package master
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -477,5 +478,53 @@ func TestScriptAdoptWhenAlreadyInstalled(t *testing.T) {
 	nodes, _ := s.st.NodesByServer(sid)
 	if len(nodes) != 1 || nodes[0].Name != "kamatera" || nodes[0].Core != "script" {
 		t.Fatalf("adopted node: %+v", nodes)
+	}
+}
+
+func TestPortalSyncSwitchesToPerUser(t *testing.T) {
+	s, err := New(Options{DataDir: t.TempDir(), AdminPass: "test-pass-123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sid, _ := s.st.CreateServer(&store.Server{Name: "JP", PublicIPv4: "8.8.8.8", Enabled: true, TrafficResetDay: 1}, util.SHA256Hex(util.RandToken(24)))
+	n := &store.Node{ServerID: sid, Name: "JP", Core: "script", Protocol: "hysteria2", Port: 443, Enabled: true}
+	n.Settings.SharedPassword = "owner"
+	if err := s.normalizeNode(n); err != nil {
+		t.Fatal(err)
+	}
+	nid, _ := s.st.CreateNode(n)
+	name, pw := "buyer", "buyerpw-123"
+	u, err := s.createUser(&UserInput{Username: &name, Password: &pw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, _ := s.st.GetNode(nid)
+	if got := (subNode{Node: node}).pw(u); got != "owner" {
+		t.Fatalf("before sync: %s", got)
+	}
+	want := s.portalDesired(node, []*store.User{u})
+	if len(want) != 1 || want[0].ID != fmt.Sprintf("nh-%d", u.ID) || want[0].Password != "buyerpw-123" {
+		t.Fatalf("desired %+v", want)
+	}
+	srv, _ := s.st.GetServer(sid)
+	sync := func(used int64) {
+		cid, _ := s.st.QueueCommand(sid, "portal_sync", "{}")
+		out, _ := json.Marshal(map[string]any{"created": 1, "usage": []map[string]any{{"id": fmt.Sprintf("nh-%d", u.ID), "used": used}}})
+		s.st.FinishCommand(sid, proto.CommandResult{ID: cid, OK: true, Output: string(out)})
+		s.afterScriptInstall(srv, cid)
+	}
+	sync(1000) // first sample: baseline only
+	sync(5000) // +4000
+	sync(200)  // portal counter reset: +200
+	got, _ := s.st.GetUser(u.ID)
+	if got.Up+got.Down != 4200 {
+		t.Fatalf("usage booked %d", got.Up+got.Down)
+	}
+	node, _ = s.st.GetNode(nid)
+	if !node.Settings.PortalUsers || (subNode{Node: node}).pw(u) != "buyerpw-123" {
+		t.Fatal("after a clean sync the subscription must use the user's own password")
+	}
+	if versionLess("1.3.10", "1.3.2") || !versionLess("1.3.1", "1.3.2") {
+		t.Fatal("versionLess")
 	}
 }

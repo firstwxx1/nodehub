@@ -695,6 +695,13 @@ func (a *Agent) runCommand(c proto.Command) {
 			res.OK = false
 			res.Output += "\n" + err.Error()
 		}
+	case "portal_sync":
+		out, err := SyncPortalUsers(c.Arg, a.cfg.DataDir)
+		res.Output = out
+		if err != nil {
+			res.OK = false
+			res.Output = err.Error() + "\n" + out
+		}
 	case "upgrade_agent":
 		if err := a.upgradeSelf(); err != nil {
 			res.OK, res.Output = false, err.Error()

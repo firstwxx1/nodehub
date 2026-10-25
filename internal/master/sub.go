@@ -729,7 +729,7 @@ func (s *Server) handleSubInfo(w http.ResponseWriter, r *http.Request) {
 // pw is the credential written into the subscription: script nodes (hysteria2-installer) authenticate every
 // client with the owner password of that script, other nodes use the user's own password.
 func (sn subNode) pw(u *store.User) string {
-	if sn.Node.Core == "script" && sn.Node.Settings.SharedPassword != "" {
+	if sn.Node.Core == "script" && sn.Node.Settings.SharedPassword != "" && !sn.Node.Settings.PortalUsers {
 		return sn.Node.Settings.SharedPassword
 	}
 	return connPw(u)

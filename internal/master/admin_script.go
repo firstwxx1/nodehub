@@ -217,6 +217,10 @@ func (s *Server) afterScriptInstall(srv *store.Server, cmdID int64) {
 	if err != nil || c.Status != "done" {
 		return
 	}
+	if c.Type == "portal_sync" {
+		s.afterPortalSync(srv, c)
+		return
+	}
 	if c.Type == "scan_import" && strings.HasPrefix(c.Arg, "adopt:") {
 		var scan agent.ImportScan
 		if json.Unmarshal([]byte(c.Output), &scan) != nil {

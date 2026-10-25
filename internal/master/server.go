@@ -49,6 +49,7 @@ type Server struct {
 	loginMu     sync.Mutex
 	loginFails  map[string][]time.Time
 	ipcheckBusy atomic.Bool
+	portal      portalSyncState
 	notifyQ     chan notifyJob
 	ports       portBook
 }

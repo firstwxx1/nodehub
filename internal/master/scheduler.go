@@ -38,6 +38,7 @@ func (s *Server) scheduler(ctx context.Context) {
 			s.checkOffline()
 		case <-minute.C:
 			s.sweepUsers()
+			s.portalSyncTick()
 			panels, _ := s.st.ListPanels()
 			for _, p := range panels {
 				if p.Enabled && time.Since(lastPanel[p.ID]) >= time.Duration(p.SyncInterval)*time.Second {
