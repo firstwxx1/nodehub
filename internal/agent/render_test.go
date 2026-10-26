@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -95,5 +96,44 @@ func TestACMEDNSNeedsToken(t *testing.T) {
 		Settings: proto.NodeSettings{SNI: "us.example.com", CertMode: "acme_dns"}}
 	if _, err := RenderSingbox([]proto.NodeConfig{n}, RenderOptions{CertDir: t.TempDir(), ACMEDir: t.TempDir()}); err == nil {
 		t.Fatal("expected error without a DNS token")
+	}
+}
+
+// A Hysteria2 client waits for the server before sending on a TCP stream, so
+// sniffing its TCP would stall each new connection for the sniff timeout.
+func TestSingboxSniffSkipsHysteria2TCP(t *testing.T) {
+	u := []proto.NodeUser{{Key: "k", UUID: "u", Password: "p"}}
+	nodes := []proto.NodeConfig{
+		{ID: 1, Core: "singbox", Protocol: "hysteria2", Port: 443, Users: u, Settings: proto.NodeSettings{SNI: "a.example.com"}},
+		{ID: 2, Core: "singbox", Protocol: "tuic", Port: 444, Users: u, Settings: proto.NodeSettings{SNI: "b.example.com"}},
+	}
+	dir := t.TempDir()
+	b, err := RenderSingbox(nodes, RenderOptions{CertDir: dir, ACMEDir: dir, BlockBT: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg struct {
+		Route struct {
+			Rules []map[string]any `json:"rules"`
+		} `json:"route"`
+	}
+	if err := json.Unmarshal(b, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	sniff := map[string]string{} // inbound tag -> network restriction ("" = all)
+	for _, r := range cfg.Route.Rules {
+		if r["action"] != "sniff" {
+			continue
+		}
+		network, _ := r["network"].(string)
+		for _, tag := range r["inbound"].([]any) {
+			sniff[tag.(string)] = network
+		}
+	}
+	if net, ok := sniff["n1"]; !ok || net != "udp" {
+		t.Fatalf("hysteria2 inbound should sniff UDP only, got %q (present=%v)", net, ok)
+	}
+	if net, ok := sniff["n2"]; !ok || net != "" {
+		t.Fatalf("tuic inbound should sniff everything, got %q (present=%v)", net, ok)
 	}
 }

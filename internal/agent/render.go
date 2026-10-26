@@ -201,6 +201,13 @@ func xrayInbound(n proto.NodeConfig, opt RenderOptions) (map[string]any, error) 
 func RenderSingbox(nodes []proto.NodeConfig, opt RenderOptions) ([]byte, error) {
 	inbounds := []any{}
 	var tags, users []string
+	// Sniffing waits up to 300ms for the client's first bytes. A Hysteria2
+	// client sends nothing on a TCP stream until the server has answered its
+	// connect request, so sniffing those streams stalled every new connection
+	// for the full timeout. Hysteria2 inbounds therefore sniff UDP only, where
+	// each datagram arrives with its payload (BitTorrent's DHT/uTP is still
+	// caught there).
+	var sniffAll, sniffUDPOnly []string
 	for _, n := range nodes {
 		if n.Core != "singbox" || len(n.Users) == 0 {
 			continue
@@ -210,12 +217,24 @@ func RenderSingbox(nodes []proto.NodeConfig, opt RenderOptions) ([]byte, error) 
 			return nil, fmt.Errorf("node %d (%s): %w", n.ID, n.Name, err)
 		}
 		inbounds = append(inbounds, ib)
-		tags = append(tags, fmt.Sprintf("n%d", n.ID))
+		tag := fmt.Sprintf("n%d", n.ID)
+		tags = append(tags, tag)
+		if n.Protocol == "hysteria2" {
+			sniffUDPOnly = append(sniffUDPOnly, tag)
+		} else {
+			sniffAll = append(sniffAll, tag)
+		}
 		for _, u := range n.Users {
 			users = append(users, u.Key)
 		}
 	}
-	rules := []any{map[string]any{"action": "sniff"}}
+	rules := []any{}
+	if len(sniffAll) > 0 {
+		rules = append(rules, map[string]any{"inbound": sniffAll, "action": "sniff"})
+	}
+	if len(sniffUDPOnly) > 0 {
+		rules = append(rules, map[string]any{"inbound": sniffUDPOnly, "network": "udp", "action": "sniff"})
+	}
 	if opt.BlockBT {
 		rules = append(rules, map[string]any{"protocol": []string{"bittorrent"}, "action": "reject"})
 	}
