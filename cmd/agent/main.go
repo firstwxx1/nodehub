@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"nodehub/internal/agent"
@@ -33,6 +34,7 @@ func main() {
 			log.Fatalf("parse %s: %v", *cfgPath, err)
 		}
 	}
+	migrateMaster(&cfg, *cfgPath)
 	if *master != "" && *token != "" {
 		cfg.Master, cfg.Token, cfg.InsecureTLS = *master, *token, *insecure
 		cfg.Defaults()
@@ -61,4 +63,30 @@ func main() {
 	}()
 	log.Printf("nodehub-agent %s started, master=%s", proto.AgentVersion, cfg.Master)
 	a.Run(stop)
+}
+
+// migrateMaster moves agents that were installed against the old master IP to the
+// panel domain once, so the master can move without touching every VPS by hand.
+func migrateMaster(cfg *agent.Config, path string) {
+	const legacy = "http://16.16.144.5:18080"
+	const current = "https://nodehub.firstwxx.com"
+	if strings.TrimRight(cfg.Master, "/") != legacy {
+		return
+	}
+	cfg.Master = current
+	b, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		log.Printf("master migration: marshal failed: %v", err)
+		return
+	}
+	tmp := path + ".migrate"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		log.Printf("master migration: write failed: %v", err)
+		return
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		log.Printf("master migration: rename failed: %v", err)
+		return
+	}
+	log.Printf("master URL migrated to %s", cfg.Master)
 }
