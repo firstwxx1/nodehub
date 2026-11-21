@@ -68,8 +68,11 @@ func main() {
 // migrateMaster moves agents that were installed against the old master IP to the
 // panel domain once, so the master can move without touching every VPS by hand.
 func migrateMaster(cfg *agent.Config, path string) {
-	const legacy = "http://16.16.144.5:18080"
-	const current = "https://nodehub.firstwxx.com"
+	legacy := strings.TrimRight(os.Getenv("NODEHUB_LEGACY_MASTER"), "/")
+	current := strings.TrimRight(os.Getenv("NODEHUB_TARGET_MASTER"), "/")
+	if legacy == "" || current == "" {
+		return
+	}
 	if strings.TrimRight(cfg.Master, "/") != legacy {
 		return
 	}

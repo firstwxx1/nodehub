@@ -422,7 +422,7 @@ func TestScriptNodeAutoCreate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sid, _ := s.st.CreateServer(&store.Server{Name: "servercheap", PublicIPv4: "172.82.74.159", Enabled: true, TrafficResetDay: 1}, util.SHA256Hex(util.RandToken(24)))
+	sid, _ := s.st.CreateServer(&store.Server{Name: "servercheap", PublicIPv4: "198.51.100.159", Enabled: true, TrafficResetDay: 1}, util.SHA256Hex(util.RandToken(24)))
 	cid, _ := s.st.QueueCommand(sid, "install_hy2", `{"port":443,"cert_type":3,"domain":"sc.example.com","name":"SC","groups":""}`)
 	out := `{"scan":{"kind":"hysteria2-installer","port":443,"domain":"sc.example.com","cert_mode":"acme","obfs_password":"o","hop_ports":"20000-40000","auth_password":"pw"},"log":""}`
 	s.st.FinishCommand(sid, proto.CommandResult{ID: cid, OK: true, Output: out})
@@ -469,7 +469,7 @@ func TestScriptAdoptWhenAlreadyInstalled(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sid, _ := s.st.CreateServer(&store.Server{Name: "kamatera", PublicIPv4: "45.130.166.10", Enabled: true, TrafficResetDay: 1}, util.SHA256Hex(util.RandToken(24)))
+	sid, _ := s.st.CreateServer(&store.Server{Name: "kamatera", PublicIPv4: "203.0.113.10", Enabled: true, TrafficResetDay: 1}, util.SHA256Hex(util.RandToken(24)))
 	cid, _ := s.st.QueueCommand(sid, "scan_import", "adopt:kamatera")
 	s.st.FinishCommand(sid, proto.CommandResult{ID: cid, OK: true, Output: `{"kind":"hysteria2-installer","port":28443,"domain":"k.example.com","cert_mode":"acme","obfs_password":"o","hop_ports":"20000-40000","auth_password":"pw","users":[]}`})
 	srv, _ := s.st.GetServer(sid)
