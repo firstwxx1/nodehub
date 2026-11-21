@@ -94,6 +94,15 @@ func (s *Server) afterPortalSync(srv *store.Server, c *store.CommandRow) {
 	if json.Unmarshal([]byte(c.Output), &res) != nil {
 		return
 	}
+	nodes, _ := s.st.NodesByServer(srv.ID)
+	var scriptNodeID int64
+	for _, n := range nodes {
+		if n.Core == "script" && n.Protocol == "hysteria2" && n.Enabled {
+			scriptNodeID = n.ID
+			break
+		}
+	}
+	hour := time.Now().Unix() / 3600 * 3600
 	key := fmt.Sprintf("portal_usage_%d", srv.ID)
 	prev := map[string]int64{}
 	_ = json.Unmarshal([]byte(s.st.Setting(key)), &prev)
@@ -113,6 +122,15 @@ func (s *Server) afterPortalSync(srv *store.Server, c *store.CommandRow) {
 		}
 		if delta > 0 {
 			_ = s.st.AddUserTraffic(uid, 0, delta)
+			if scriptNodeID > 0 {
+				if _, uerr := s.st.GetUser(uid); uerr == nil {
+					// The portal reports one combined byte counter; book it as down and mirror it
+					// into the per-user and node hourly rows the dashboard reads.
+					_ = s.st.AddHourly(hour, scriptNodeID, uid, 0, delta)
+					_ = s.st.AddHourly(hour, scriptNodeID, 0, 0, delta)
+					_ = s.st.AddNodeTotals(scriptNodeID, 0, delta)
+				}
+			}
 			s.refreshUserStatus(uid)
 		}
 	}
@@ -122,7 +140,6 @@ func (s *Server) afterPortalSync(srv *store.Server, c *store.CommandRow) {
 	if len(res.Errors) > 0 {
 		return
 	}
-	nodes, _ := s.st.NodesByServer(srv.ID)
 	for _, n := range nodes {
 		if n.Core == "script" && n.Protocol == "hysteria2" && !n.Settings.PortalUsers {
 			n.Settings.PortalUsers = true
