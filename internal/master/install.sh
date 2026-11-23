@@ -92,6 +92,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart=$BIN/nodehub-agent -config /etc/nodehub/agent.json
+MemoryHigh=160M
+MemoryMax=256M
 Restart=always
 RestartSec=3
 LimitNOFILE=1048576
