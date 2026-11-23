@@ -522,10 +522,14 @@ func renderClash(nodes []subNode, u *store.User, site string, smart bool) string
 		"GEOSITE,microsoft,Microsoft",
 		"GEOSITE,private,DIRECT",
 		"GEOIP,private,DIRECT,no-resolve",
-		"GEOSITE,CN,"+direct,
-		"GEOIP,CN,"+direct+",no-resolve",
-		"MATCH,"+sel,
 	)
+	if smart {
+		rules = append(rules,
+			"GEOSITE,CN,DIRECT",
+			"GEOIP,CN,DIRECT,no-resolve",
+		)
+	}
+	rules = append(rules, "MATCH,"+sel)
 
 	for _, r := range rules {
 		sb.WriteString("  - " + r + "\n")
