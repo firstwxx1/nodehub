@@ -454,9 +454,9 @@ func renderClash(nodes []subNode, u *store.User, site string, smart bool) string
 	// 一键代理
 	topList := append([]string{auto, fb, "台湾", "日本", "美国", "新加坡", "其他地区", direct}, names...)
 	sb.WriteString("  - " + yamlStr(map[string]any{"name": sel, "type": "select", "proxies": topList}) + "\n")
-	// 自动选择 & 故障转移
-	sb.WriteString("  - " + yamlStr(map[string]any{"name": auto, "type": "url-test", "url": "https://www.gstatic.com/generate_204", "interval": 300, "tolerance": 50, "proxies": names}) + "\n")
-	sb.WriteString("  - " + yamlStr(map[string]any{"name": fb, "type": "fallback", "url": "https://www.gstatic.com/generate_204", "interval": 300, "proxies": names}) + "\n")
+	// 自动选择 & 故障转移（lazy=true 避免未选中分组持续消耗后台探测流量）
+	sb.WriteString("  - " + yamlStr(map[string]any{"name": auto, "type": "url-test", "url": "https://www.gstatic.com/generate_204", "interval": 300, "tolerance": 50, "lazy": true, "proxies": names}) + "\n")
+	sb.WriteString("  - " + yamlStr(map[string]any{"name": fb, "type": "fallback", "url": "https://www.gstatic.com/generate_204", "interval": 300, "lazy": true, "proxies": names}) + "\n")
 
 	// 业务分流
 	stdBusiness := []string{sel, "台湾", "日本", "美国", "新加坡", "其他地区", direct}
@@ -473,12 +473,12 @@ func renderClash(nodes []subNode, u *store.User, site string, smart bool) string
 	sb.WriteString("  - " + yamlStr(map[string]any{"name": "Microsoft", "type": "select", "proxies": []string{direct, sel, "台湾", "日本", "美国", "新加坡", "其他地区"}}) + "\n")
 	sb.WriteString("  - " + yamlStr(map[string]any{"name": "网络检测", "type": "select", "proxies": stdBusiness}) + "\n")
 
-	// 地区节点组 (url-test)
-	sb.WriteString("  - " + yamlStr(map[string]any{"name": "台湾", "type": "url-test", "url": "https://www.gstatic.com/generate_204", "interval": 300, "tolerance": 50, "proxies": tw}) + "\n")
-	sb.WriteString("  - " + yamlStr(map[string]any{"name": "日本", "type": "url-test", "url": "https://www.gstatic.com/generate_204", "interval": 300, "tolerance": 50, "proxies": jp}) + "\n")
-	sb.WriteString("  - " + yamlStr(map[string]any{"name": "美国", "type": "url-test", "url": "https://www.gstatic.com/generate_204", "interval": 300, "tolerance": 50, "proxies": us}) + "\n")
-	sb.WriteString("  - " + yamlStr(map[string]any{"name": "新加坡", "type": "url-test", "url": "https://www.gstatic.com/generate_204", "interval": 300, "tolerance": 50, "proxies": sg}) + "\n")
-	sb.WriteString("  - " + yamlStr(map[string]any{"name": "其他地区", "type": "url-test", "url": "https://www.gstatic.com/generate_204", "interval": 300, "tolerance": 50, "proxies": other}) + "\n")
+	// 地区节点组 (url-test, lazy=true)
+	sb.WriteString("  - " + yamlStr(map[string]any{"name": "台湾", "type": "url-test", "url": "https://www.gstatic.com/generate_204", "interval": 300, "tolerance": 50, "lazy": true, "proxies": tw}) + "\n")
+	sb.WriteString("  - " + yamlStr(map[string]any{"name": "日本", "type": "url-test", "url": "https://www.gstatic.com/generate_204", "interval": 300, "tolerance": 50, "lazy": true, "proxies": jp}) + "\n")
+	sb.WriteString("  - " + yamlStr(map[string]any{"name": "美国", "type": "url-test", "url": "https://www.gstatic.com/generate_204", "interval": 300, "tolerance": 50, "lazy": true, "proxies": us}) + "\n")
+	sb.WriteString("  - " + yamlStr(map[string]any{"name": "新加坡", "type": "url-test", "url": "https://www.gstatic.com/generate_204", "interval": 300, "tolerance": 50, "lazy": true, "proxies": sg}) + "\n")
+	sb.WriteString("  - " + yamlStr(map[string]any{"name": "其他地区", "type": "url-test", "url": "https://www.gstatic.com/generate_204", "interval": 300, "tolerance": 50, "lazy": true, "proxies": other}) + "\n")
 	sb.WriteString("  - " + yamlStr(map[string]any{"name": direct, "type": "select", "proxies": []string{"DIRECT"}}) + "\n")
 
 	sb.WriteString("rules:\n")
@@ -717,21 +717,21 @@ func renderSingbox(nodes []subNode, u *store.User) string {
 	}
 
 	ruleSets := []any{
-		map[string]any{"tag": "geosite-category-ai-!cn", "type": "remote", "format": "binary", "url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/category-ai-!cn.srs", "download_detour": sel},
-		map[string]any{"tag": "geosite-youtube", "type": "remote", "format": "binary", "url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/youtube.srs", "download_detour": sel},
-		map[string]any{"tag": "geosite-google", "type": "remote", "format": "binary", "url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/google.srs", "download_detour": sel},
-		map[string]any{"tag": "geosite-netflix", "type": "remote", "format": "binary", "url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/netflix.srs", "download_detour": sel},
-		map[string]any{"tag": "geosite-spotify", "type": "remote", "format": "binary", "url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/spotify.srs", "download_detour": sel},
-		map[string]any{"tag": "geosite-steam", "type": "remote", "format": "binary", "url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/steam.srs", "download_detour": sel},
-		map[string]any{"tag": "geosite-telegram", "type": "remote", "format": "binary", "url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/telegram.srs", "download_detour": sel},
-		map[string]any{"tag": "geosite-tiktok", "type": "remote", "format": "binary", "url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/tiktok.srs", "download_detour": sel},
-		map[string]any{"tag": "geosite-apple", "type": "remote", "format": "binary", "url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/apple.srs", "download_detour": sel},
-		map[string]any{"tag": "geosite-microsoft", "type": "remote", "format": "binary", "url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/microsoft.srs", "download_detour": sel},
-		map[string]any{"tag": "geosite-private", "type": "remote", "format": "binary", "url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/private.srs", "download_detour": sel},
-		map[string]any{"tag": "geosite-cn", "type": "remote", "format": "binary", "url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/cn.srs", "download_detour": sel},
-		map[string]any{"tag": "geoip-telegram", "type": "remote", "format": "binary", "url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geoip/telegram.srs", "download_detour": sel},
-		map[string]any{"tag": "geoip-private", "type": "remote", "format": "binary", "url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geoip/private.srs", "download_detour": sel},
-		map[string]any{"tag": "geoip-cn", "type": "remote", "format": "binary", "url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geoip/cn.srs", "download_detour": sel},
+		map[string]any{"tag": "geosite-category-ai-!cn", "type": "remote", "format": "binary", "url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/category-ai-!cn.srs", "download_detour": sel, "update_interval": "1d"},
+		map[string]any{"tag": "geosite-youtube", "type": "remote", "format": "binary", "url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/youtube.srs", "download_detour": sel, "update_interval": "1d"},
+		map[string]any{"tag": "geosite-google", "type": "remote", "format": "binary", "url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/google.srs", "download_detour": sel, "update_interval": "1d"},
+		map[string]any{"tag": "geosite-netflix", "type": "remote", "format": "binary", "url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/netflix.srs", "download_detour": sel, "update_interval": "1d"},
+		map[string]any{"tag": "geosite-spotify", "type": "remote", "format": "binary", "url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/spotify.srs", "download_detour": sel, "update_interval": "1d"},
+		map[string]any{"tag": "geosite-steam", "type": "remote", "format": "binary", "url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/steam.srs", "download_detour": sel, "update_interval": "1d"},
+		map[string]any{"tag": "geosite-telegram", "type": "remote", "format": "binary", "url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/telegram.srs", "download_detour": sel, "update_interval": "1d"},
+		map[string]any{"tag": "geosite-tiktok", "type": "remote", "format": "binary", "url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/tiktok.srs", "download_detour": sel, "update_interval": "1d"},
+		map[string]any{"tag": "geosite-apple", "type": "remote", "format": "binary", "url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/apple.srs", "download_detour": sel, "update_interval": "1d"},
+		map[string]any{"tag": "geosite-microsoft", "type": "remote", "format": "binary", "url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/microsoft.srs", "download_detour": sel, "update_interval": "1d"},
+		map[string]any{"tag": "geosite-private", "type": "remote", "format": "binary", "url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/private.srs", "download_detour": sel, "update_interval": "1d"},
+		map[string]any{"tag": "geosite-cn", "type": "remote", "format": "binary", "url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/cn.srs", "download_detour": sel, "update_interval": "1d"},
+		map[string]any{"tag": "geoip-telegram", "type": "remote", "format": "binary", "url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geoip/telegram.srs", "download_detour": sel, "update_interval": "1d"},
+		map[string]any{"tag": "geoip-private", "type": "remote", "format": "binary", "url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geoip/private.srs", "download_detour": sel, "update_interval": "1d"},
+		map[string]any{"tag": "geoip-cn", "type": "remote", "format": "binary", "url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geoip/cn.srs", "download_detour": sel, "update_interval": "1d"},
 	}
 
 	cfg := map[string]any{

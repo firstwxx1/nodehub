@@ -23,10 +23,31 @@ import (
 const portalPrefix = "nh-"
 
 type portalSyncState struct {
-	mu      sync.Mutex
-	hash    map[int64]string    // last desired-set hash queued per server
-	at      map[int64]time.Time // when it was queued
-	pending map[int64]int64     // command id still in flight
+	mu          sync.Mutex
+	hash        map[int64]string    // last desired-set hash queued per server
+	at          map[int64]time.Time // when it was queued
+	pending     map[int64]int64     // command id still in flight
+	debounceMu  sync.Mutex
+	debounceTmr *time.Timer
+}
+
+// triggerPortalSync schedules an immediate debounced portal sync (500ms coalescing) so newly
+// provisioned, renewed, or revoked users propagate to script Hysteria2 nodes within seconds
+// instead of waiting for the 1-minute scheduler tick.
+func (s *Server) triggerPortalSync() {
+	ps := &s.portal
+	ps.debounceMu.Lock()
+	defer ps.debounceMu.Unlock()
+	if ps.debounceTmr != nil {
+		ps.debounceTmr.Reset(500 * time.Millisecond)
+		return
+	}
+	ps.debounceTmr = time.AfterFunc(500*time.Millisecond, func() {
+		ps.debounceMu.Lock()
+		ps.debounceTmr = nil
+		ps.debounceMu.Unlock()
+		s.portalSyncTick()
+	})
 }
 
 func (s *Server) portalDesired(n *store.Node, users []*store.User) []agent.PortalUser {

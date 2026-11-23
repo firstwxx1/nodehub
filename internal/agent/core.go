@@ -105,9 +105,11 @@ func (c *Core) spawn() error {
 		return nil
 	}
 	var logw io.Writer = io.Discard
+	var logCloser io.Closer
 	if c.LogPath != "" {
-		if f, err := os.OpenFile(c.LogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err == nil {
-			logw = f
+		if rf, err := newRotatingFile(c.LogPath, 10<<20); err == nil {
+			logw = rf
+			logCloser = rf
 		}
 	}
 	errBuf := &ringBuffer{max: 4096}
@@ -116,6 +118,9 @@ func (c *Core) spawn() error {
 	cmd.Stderr = io.MultiWriter(logw, errBuf)
 	cmd.Env = append(os.Environ(), "XRAY_LOCATION_ASSET="+dirOf(c.Bin), "ENABLE_DEPRECATED_LEGACY_DNS_SERVERS=true")
 	if err := cmd.Start(); err != nil {
+		if logCloser != nil {
+			_ = logCloser.Close()
+		}
 		c.lastErr = err.Error()
 		return err
 	}
@@ -125,8 +130,8 @@ func (c *Core) spawn() error {
 	started := time.Now()
 	go func() {
 		err := cmd.Wait()
-		if f, ok := logw.(*os.File); ok {
-			f.Close()
+		if logCloser != nil {
+			_ = logCloser.Close()
 		}
 		c.mu.Lock()
 		c.cmd = nil
@@ -226,4 +231,58 @@ func (r *ringBuffer) String() string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.buf.String()
+}
+
+// rotatingFile caps proxy core log files so small VPS disks never fill up.
+type rotatingFile struct {
+	mu   sync.Mutex
+	path string
+	max  int64
+	size int64
+	f    *os.File
+}
+
+func newRotatingFile(path string, maxBytes int64) (*rotatingFile, error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	var sz int64
+	if st, err := f.Stat(); err == nil {
+		sz = st.Size()
+	}
+	return &rotatingFile{path: path, max: maxBytes, size: sz, f: f}, nil
+}
+
+func (rf *rotatingFile) Write(p []byte) (int, error) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.f == nil {
+		return len(p), nil
+	}
+	if rf.max > 0 && rf.size+int64(len(p)) > rf.max {
+		_ = rf.f.Close()
+		_ = os.Rename(rf.path, rf.path+".1")
+		f, err := os.OpenFile(rf.path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+		if err != nil {
+			rf.f = nil
+			return len(p), nil
+		}
+		rf.f = f
+		rf.size = 0
+	}
+	n, err := rf.f.Write(p)
+	rf.size += int64(n)
+	return n, err
+}
+
+func (rf *rotatingFile) Close() error {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.f == nil {
+		return nil
+	}
+	err := rf.f.Close()
+	rf.f = nil
+	return err
 }

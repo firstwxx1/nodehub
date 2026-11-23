@@ -25,6 +25,7 @@ type UserInput struct {
 	AddTrafficGB   *float64 `json:"add_traffic_gb"`   // add to the current limit (top-up)
 	ExpireAt       *int64   `json:"expire_at"`        // unix seconds, 0 = never
 	ExtendDays     *int     `json:"extend_days"`      // extend from max(now, expire_at)
+	ExpireDays     *int     `json:"expire_days"`      // alias of extend_days for shop compatibility
 	SpeedLimit     *int     `json:"speed_limit"`
 	DeviceLimit    *int     `json:"device_limit"`
 	Groups         *string  `json:"groups"`
@@ -89,12 +90,16 @@ func (s *Server) applyUserInput(u *store.User, in *UserInput, creating bool) err
 	if in.ExpireAt != nil {
 		u.ExpireAt = *in.ExpireAt
 	}
-	if in.ExtendDays != nil {
+	extendDays := in.ExtendDays
+	if extendDays == nil && in.ExpireDays != nil {
+		extendDays = in.ExpireDays
+	}
+	if extendDays != nil {
 		base := time.Now().Unix()
 		if u.ExpireAt > base {
 			base = u.ExpireAt
 		}
-		u.ExpireAt = base + int64(*in.ExtendDays)*86400
+		u.ExpireAt = base + int64(*extendDays)*86400
 	}
 	if in.SpeedLimit != nil {
 		u.SpeedLimit = max(0, *in.SpeedLimit)
@@ -149,6 +154,7 @@ func (s *Server) createUser(in *UserInput) (*store.User, error) {
 	}
 	u.ID = id
 	s.bump()
+	s.triggerPortalSync()
 	s.emit("user.created", "info", fmt.Sprintf("创建用户 %s", displayUser(u)), map[string]any{"user_id": u.ID, "external_id": u.ExternalID})
 	return u, nil
 }
@@ -166,6 +172,7 @@ func (s *Server) updateUser(u *store.User, in *UserInput) error {
 	u.Status = oldStatus
 	_ = s.st.UpdateUser(u)
 	s.refreshUserStatus(u.ID)
+	s.triggerPortalSync()
 	nu, err := s.st.GetUser(u.ID)
 	if err == nil {
 		*u = *nu
@@ -175,11 +182,12 @@ func (s *Server) updateUser(u *store.User, in *UserInput) error {
 
 type userView struct {
 	*store.User
-	Used       int64  `json:"used"`
-	Remaining  int64  `json:"remaining"` // -1 = unlimited
-	SubURL     string `json:"sub_url"`
-	OnlineIPs  int    `json:"online_ips"`
-	ExpireDays int    `json:"expire_days"` // -1 = never
+	Used       int64             `json:"used"`
+	Remaining  int64             `json:"remaining"` // -1 = unlimited
+	SubURL     string            `json:"sub_url"`
+	SubURLs    map[string]string `json:"sub_urls"`
+	OnlineIPs  int               `json:"online_ips"`
+	ExpireDays int               `json:"expire_days"` // -1 = never
 }
 
 func (s *Server) viewUser(r *http.Request, u *store.User) userView {
@@ -194,6 +202,11 @@ func (s *Server) viewUser(r *http.Request, u *store.User) userView {
 		}
 	}
 	v.SubURL = s.subURL(r) + "/sub/" + u.SubToken
+	v.SubURLs = map[string]string{
+		"clash":     v.SubURL + "?target=clash",
+		"singbox":   v.SubURL + "?target=singbox",
+		"universal": v.SubURL,
+	}
 	return v
 }
 
@@ -211,6 +224,7 @@ func (s *Server) resetUserCredentials(u *store.User, uuid, token bool) error {
 		return err
 	}
 	s.bump()
+	s.triggerPortalSync()
 	return nil
 }
 
@@ -342,6 +356,7 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request, a *sto
 		return
 	}
 	s.bump()
+	s.triggerPortalSync()
 	s.audit(r, a, "user.delete", fmt.Sprint(pathID(r)), "")
 	ok(w, map[string]any{"ok": true})
 }

@@ -71,9 +71,26 @@ func (s *Server) openAuth(scope string, h openHandler) http.HandlerFunc {
 			writeErr(w, 403, "IP not allowed: "+clientIP(r))
 			return
 		}
-		s.st.TouchAPIKey(k.ID)
+		s.touchAPIKeyDebounced(k.ID)
 		h(w, r, k)
 	}
+}
+
+var (
+	apiKeyTouchMu sync.Mutex
+	apiKeyTouched = map[int64]time.Time{}
+)
+
+func (s *Server) touchAPIKeyDebounced(id int64) {
+	now := time.Now()
+	apiKeyTouchMu.Lock()
+	if last, ok := apiKeyTouched[id]; ok && now.Sub(last) < 60*time.Second {
+		apiKeyTouchMu.Unlock()
+		return
+	}
+	apiKeyTouched[id] = now
+	apiKeyTouchMu.Unlock()
+	s.st.TouchAPIKey(id)
 }
 
 func ipAllowed(ip, list string) bool {
@@ -103,7 +120,36 @@ func (c *captureWriter) Write(b []byte) (int, error) {
 	return c.ResponseWriter.Write(b)
 }
 
-var idemLocks sync.Map // key -> *sync.Mutex, serialises concurrent requests carrying the same key
+type idemLockEntry struct {
+	mu   sync.Mutex
+	refs int
+}
+
+var (
+	idemMapMu sync.Mutex
+	idemLocks = map[string]*idemLockEntry{} // ref-counted per key to prevent delete-while-waiting races
+)
+
+func acquireIdemLock(key string) func() {
+	idemMapMu.Lock()
+	e := idemLocks[key]
+	if e == nil {
+		e = &idemLockEntry{}
+		idemLocks[key] = e
+	}
+	e.refs++
+	idemMapMu.Unlock()
+	e.mu.Lock()
+	return func() {
+		e.mu.Unlock()
+		idemMapMu.Lock()
+		e.refs--
+		if e.refs <= 0 {
+			delete(idemLocks, key)
+		}
+		idemMapMu.Unlock()
+	}
+}
 
 func (s *Server) idem(h openHandler) openHandler {
 	return func(w http.ResponseWriter, r *http.Request, k *store.APIKey) {
@@ -118,12 +164,8 @@ func (s *Server) idem(h openHandler) openHandler {
 		}
 		full := fmt.Sprintf("%d:%s", k.ID, key)
 		request := r.Method + " " + r.URL.Path
-		mu, _ := idemLocks.LoadOrStore(full, &sync.Mutex{})
-		mu.(*sync.Mutex).Lock()
-		defer func() {
-			mu.(*sync.Mutex).Unlock()
-			idemLocks.Delete(full)
-		}()
+		release := acquireIdemLock(full)
+		defer release()
 		if rec, found := s.st.IdemGet(full); found {
 			if rec.Request != request {
 				writeErr(w, 422, "Idempotency-Key already used for "+rec.Request)
@@ -433,6 +475,7 @@ func (s *Server) openDeleteUser(w http.ResponseWriter, r *http.Request, k *store
 		return
 	}
 	s.bump()
+	s.triggerPortalSync()
 	s.st.Audit("api:"+k.Name, "user.delete", fmt.Sprint(u.ID), u.ExternalID, clientIP(r))
 	ok(w, map[string]any{"ok": true})
 }

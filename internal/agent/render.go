@@ -312,6 +312,9 @@ func singboxInbound(n proto.NodeConfig, opt RenderOptions) (map[string]any, erro
 		"listen":      strings.Replace(listenAddr(n), "0.0.0.0", "::", 1),
 		"listen_port": n.Port,
 	}
+	if n.Protocol != "hysteria2" && n.Protocol != "tuic" {
+		ib["tcp_fast_open"] = true
+	}
 	users := []any{}
 	switch n.Protocol {
 	case "hysteria2":

@@ -55,7 +55,7 @@ func (c *Config) Defaults() {
 		c.SingboxAPIPort = 10086
 	}
 	if c.HeartbeatSec <= 0 {
-		c.HeartbeatSec = 10
+		c.HeartbeatSec = 5
 	}
 	t := true
 	if c.BlockPrivate == nil {
