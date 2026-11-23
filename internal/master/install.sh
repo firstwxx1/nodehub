@@ -150,12 +150,20 @@ if grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null;
   CC_ALGO="bbr"
 fi
 
+# Preserve IPv4 forwarding if already active or Docker is installed (prevents cloud images like
+# GCP's 60-gce-network-security.conf from resetting net.ipv4.ip_forward=0 on sysctl --system).
+IP_FWD_LINE=""
+if [ "$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null || echo 0)" = "1" ] || command -v docker >/dev/null 2>&1; then
+  IP_FWD_LINE="net.ipv4.ip_forward = 1"
+fi
+
 mkdir -p /etc/sysctl.d
 rm -f /etc/sysctl.d/99-nodehub.conf /etc/sysctl.d/99-hysteria2.conf
 cat > /etc/sysctl.d/99-z-nodehub.conf <<EOF
 # NodeHub proxy network stack tuning (auto-scaled for ${MEM_KB}KB RAM)
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = ${CC_ALGO}
+${IP_FWD_LINE}
 net.core.rmem_max = 16777216
 net.core.wmem_max = 16777216
 net.core.rmem_default = 262144
