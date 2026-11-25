@@ -604,6 +604,9 @@ func TestDualStackProvisionWithCloudflare(t *testing.T) {
 	if !strings.Contains(string(scriptBody), ts.URL) || strings.Contains(string(scriptBody), "__MASTER_URL__") {
 		t.Fatalf("dual-stack.sh did not substitute master URL")
 	}
+	if strings.Contains(string(scriptBody), "$GROUPS") || strings.Contains(string(scriptBody), "\r") || !strings.Contains(string(scriptBody), "NODE_GROUPS") {
+		t.Fatalf("dual-stack.sh must avoid bash built-in $GROUPS and CRLF")
+	}
 
 	raw := "nhk_" + util.RandToken(30)
 	_, _ = s.st.CreateAPIKey("prov", raw[:10], util.SHA256Hex(raw), "read,write", "")

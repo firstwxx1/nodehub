@@ -24,7 +24,7 @@ HY2_PORT=44443
 TCP_PORT=0
 HOP_PORTS="20000-40000"
 REALITY_DEST="www.apple.com:443"
-GROUPS=""
+NODE_GROUPS=""
 NO_CF=0
 INSECURE=0
 IP_OVERRIDE=""
@@ -41,7 +41,7 @@ while [ $# -gt 0 ]; do
     --tcp-port)     TCP_PORT="$2"; shift 2 ;;
     --hop-ports)    HOP_PORTS="$2"; shift 2 ;;
     --reality-dest) REALITY_DEST="$2"; shift 2 ;;
-    --groups)       GROUPS="$2"; shift 2 ;;
+    --groups)       NODE_GROUPS="$2"; shift 2 ;;
     --no-cf)        NO_CF=1; shift ;;
     --insecure)     INSECURE=1; shift ;;
     -h|--help)
@@ -107,7 +107,7 @@ PAYLOAD=$(cat <<EOF
   "tcp_port": ${TCP_PORT},
   "hop_ports": "$(json_esc "$HOP_PORTS")",
   "reality_dest": "$(json_esc "$REALITY_DEST")",
-  "groups": "$(json_esc "$GROUPS")"
+  "groups": "$(json_esc "$NODE_GROUPS")"
 }
 EOF
 )
@@ -203,7 +203,9 @@ done
 echo ""
 echo "================================================================"
 echo " NodeHub 一键双栈部署完成：${NAME} (${PUB_IP})"
-[ -n "$RES_DOMAIN" ] && echo " 绑定域名：${RES_DOMAIN}（Cloudflare DNS-01 自动签发与续期证书）"
+if [ -n "$RES_DOMAIN" ]; then
+  echo " 绑定域名：${RES_DOMAIN}（$([ "$RES_CERT_MODE" = "acme_dns" ] && echo 'Cloudflare DNS-01 自动签发与续期证书' || echo "证书模式: ${RES_CERT_MODE:-self}")）"
+fi
 [ -n "$RES_HY2_PORT" ] && echo " [UDP] Hysteria2     :${RES_HY2_PORT} (跳跃 ${HOP_PORTS:-关}) -> sing-box $([ "$SB_OK" = 1 ] && echo '运行中 ✓' || echo '启动中，请查看 /etc/nodehub/sing-box.log')"
 [ -n "$RES_VLESS_PORT" ] && echo " [TCP] VLESS-Reality :${RES_VLESS_PORT} -> xray $([ "$XRAY_OK" = 1 ] && echo '运行中 ✓' || echo '启动中，请查看 /etc/nodehub/xray.log')"
 if [ "$RES_CERT_MODE" = "acme_dns" ]; then
