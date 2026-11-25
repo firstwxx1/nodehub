@@ -148,6 +148,9 @@ func (s *Server) buildAgentConfig(srv *store.Server) (*proto.AgentConfig, error)
 			if nc.Settings.CertMode == "acme_dns" {
 				nc.Settings.ACMEDNSProvider, nc.Settings.ACMEDNSToken = "cloudflare", s.st.Setting("cf_api_token")
 			}
+			if (nc.Settings.CertMode == "acme" || nc.Settings.CertMode == "acme_dns") && nc.Settings.ACMEEmail == "" {
+				nc.Settings.ACMEEmail = s.st.Setting("acme_email")
+			}
 			if n.Source == "panel" {
 				pus, err := s.st.PanelUsers(n.ID)
 				if err != nil {

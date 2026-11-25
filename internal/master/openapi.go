@@ -28,6 +28,7 @@ func (s *Server) openRoutes(m *http.ServeMux) {
 	m.HandleFunc("GET "+p+"/nodes", s.openAuth("read", s.openListNodes))
 	m.HandleFunc("GET "+p+"/nodes/{id}", s.openAuth("read", s.openGetNode))
 	m.HandleFunc("GET "+p+"/servers", s.openAuth("read", s.openListServers))
+	m.HandleFunc("POST "+p+"/provision", s.openAuth("write", s.openProvisionDualStack))
 	m.HandleFunc("GET "+p+"/stats", s.openAuth("read", s.openStats))
 	m.HandleFunc("GET "+p+"/idempotency/{key}", s.openAuth("read", s.openIdemLookup))
 

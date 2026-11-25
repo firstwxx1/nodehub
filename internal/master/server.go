@@ -62,6 +62,9 @@ type verEntry struct {
 //go:embed install.sh
 var installScript string
 
+//go:embed dual-stack.sh
+var dualStackScript string
+
 var _ embed.FS
 
 func New(opt Options) (*Server, error) {
@@ -182,6 +185,7 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /agent/v1/config", s.agentAuth(s.agentConfig))
 	m.HandleFunc("POST /agent/v1/report", s.agentAuth(s.agentReport))
 	m.HandleFunc("GET /install.sh", s.handleInstallScript)
+	m.HandleFunc("GET /dual-stack.sh", s.handleDualStackScript)
 	m.HandleFunc("GET /dl/{name}", s.handleDownload)
 
 	// subscription
@@ -214,6 +218,7 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /api/servers/{id}/command", s.admin(s.handleServerCommand))
 	m.HandleFunc("GET /api/servers/{id}/commands", s.admin(s.handleServerCommands))
 	m.HandleFunc("POST /api/servers/{id}/reset-traffic", s.admin(s.handleServerResetTraffic))
+	m.HandleFunc("POST /api/servers/{id}/dual-stack", s.admin(s.handleServerDualStack))
 	m.HandleFunc("POST /api/servers/{id}/script-node", s.admin(s.handleScriptNodeInstall))
 	m.HandleFunc("POST /api/servers/{id}/script-node/adopt", s.admin(s.handleScriptNodeAdopt))
 	m.HandleFunc("POST /api/servers/{id}/script-node/finish", s.admin(s.handleScriptNodeFinish))

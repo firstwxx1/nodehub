@@ -450,10 +450,74 @@ async function adoptFlow(serverId, reload) {
   });
 }
 
+function dualStackModal(server, reload) {
+  const body = `<div class="note info" style="margin-bottom:12px">在「<b>${esc(server.name)}</b>」上一次性补齐 <b>Hysteria2（UDP + 端口跳跃 + Salamander）</b> 与 <b>VLESS-Reality（TCP 抗限速兜底）</b>。若面板已配置 Cloudflare 令牌，会自动创建 DNS A 记录并通过 DNS-01 申请可信域名证书（无需 80/443 端口）。</div>
+    <div class="form">
+      ${inp('证书域名 / 子域前缀', 'domain', '', { full: true, ph: '留空自动生成（如 jp2.你的CF根域名），也可直接填前缀如 jp2' })}
+      ${inp('Hysteria2 端口 (UDP)', 'hy2_port', 44443, { type: 'number', dtype: 'int' })}
+      ${inp('VLESS-Reality 端口 (TCP)', 'tcp_port', 44443, { type: 'number', dtype: 'int', hint: '可与 UDP 同端口号，互不冲突' })}
+      ${inp('端口跳跃区间', 'hop_ports', '20000-40000', { ph: '填 none 关闭跳跃' })}
+      ${inp('Reality 伪装目标', 'reality_dest', 'www.apple.com:443')}
+      ${inp('分组', 'groups', '', { ph: '留空 = 所有用户可用' })}
+      ${inp('', 'no_cf', false, { type: 'checkbox', hint: '跳过 Cloudflare 域名与证书（改为自签证书）', full: true })}
+    </div>`;
+  modal('一键双栈（Hy2 + Reality + CF 证书）', body, {
+    okText: '一键创建',
+    ok: async (m) => {
+      const f = readForm(m);
+      const r = await api('POST', `/api/servers/${server.id}/dual-stack`, f);
+      const msgs = [];
+      if (r.domain) msgs.push(`域名 ${r.domain}${r.dns_action ? '（CF ' + r.dns_action + '）' : ''}`);
+      if (r.hy2_node) msgs.push(`Hy2 :${r.hy2_node.port}/udp (${r.cert_mode || 'self'})`);
+      if (r.vless_node) msgs.push(`Reality :${r.vless_node.port}/tcp`);
+      toast('已下发双栈：' + msgs.join(' · '));
+      reload && reload();
+    },
+  });
+}
+
+async function showDualStackCommandModal() {
+  const baseUrl = location.origin;
+  const body = `<p style="margin-top:0">在任意全新 VPS 上以 root 执行下面这条命令，会自动：<b>注册服务器 → 写 Cloudflare DNS A 记录 → 安装 Agent/Xray/sing-box → 自动签发 CF DNS-01 证书 → 同时上线 Hysteria2 + VLESS-Reality TCP</b>。</p>
+    <div class="form">
+      ${inp('API Key（write 权限）', 'api_key', '', { full: true, ph: '粘贴 nhk_ 开头的 API Key，或点下方按钮一键创建' })}
+      ${inp('服务器名称', 'name', '日本新机')}
+      ${inp('域名或子域前缀（可选）', 'domain', '', { ph: '留空自动生成；可填 jp2 或 jp2.你的域名' })}
+      ${inp('Hysteria2 端口 (UDP)', 'hy2_port', 44443, { type: 'number', dtype: 'int' })}
+      ${inp('VLESS-Reality 端口 (TCP)', 'tcp_port', 44443, { type: 'number', dtype: 'int' })}
+    </div>
+    <div class="codebox mt" id="dsCmd" style="font-size:12px;word-break:break-all"></div>
+    <div class="btns mt">
+      <button type="button" class="btn primary" id="copyDsCmd">${icon('copy')}复制一键命令</button>
+      <button type="button" class="btn" id="genDsKey">一键生成专用 API Key</button>
+    </div>`;
+  const m = modal('新机一键双栈命令（Hy2 + Reality + CF 证书）', body, { wide: true, cancelText: '关闭' });
+  const renderCmd = () => {
+    const f = readForm(m);
+    const key = f.api_key || '<你的_API_KEY>';
+    let cmd = `curl -fsSL ${baseUrl}/dual-stack.sh | bash -s -- --key '${key}' --name '${f.name || '新服务器'}'`;
+    if (f.domain) cmd += ` --domain '${f.domain}'`;
+    if (f.hy2_port && Number(f.hy2_port) !== 44443) cmd += ` --hy2-port ${f.hy2_port}`;
+    if (f.tcp_port && Number(f.tcp_port) !== Number(f.hy2_port || 44443)) cmd += ` --tcp-port ${f.tcp_port}`;
+    m.querySelector('#dsCmd').textContent = cmd;
+  };
+  m.querySelectorAll('input').forEach((el) => { el.oninput = renderCmd; });
+  renderCmd();
+  m.querySelector('#copyDsCmd').onclick = () => copy(m.querySelector('#dsCmd').textContent);
+  m.querySelector('#genDsKey').onclick = async () => {
+    const r = await api('POST', '/api/apikeys', { name: 'dual-stack-' + new Date().toISOString().slice(0, 10), scopes: 'read,write', enabled: true });
+    m.querySelector('[name="api_key"]').value = r.key;
+    renderCmd();
+    toast('已自动创建专用 API Key 并填入命令（请妥善保存）');
+  };
+}
+
 PAGES.servers = async (el) => {
+  let srvList = [];
   const load = async () => {
     const list = await api('GET', '/api/servers');
-    const head = topbar('服务器', `${list.filter((s) => s.online).length} / ${list.length} 在线`, `<button class="btn primary" data-act="add">${icon('plus')}添加服务器</button>`);
+    srvList = list;
+    const head = topbar('服务器', `${list.filter((s) => s.online).length} / ${list.length} 在线`, `<button class="btn" data-act="dualCmd">⚡ 新机一键双栈命令</button><button class="btn primary" data-act="add">${icon('plus')}添加服务器</button>`);
     if (!list.length) { el.innerHTML = head + `<div class="card empty">还没有服务器。点击右上角「添加服务器」，在 VPS 上运行一条安装命令即可接入。</div>`; return; }
     el.innerHTML = head + `<div class="card tbl-wrap"><table class="tbl"><thead><tr><th>服务器</th><th>状态</th><th>CPU</th><th>内存</th><th>磁盘</th><th>网速</th><th>本期流量</th><th>到期</th><th>Agent / 配置</th><th></th></tr></thead><tbody>
     ${list.map((s) => {
@@ -474,12 +538,14 @@ PAGES.servers = async (el) => {
         <td><div class="cell-2"><span>${s.agent_version ? 'v' + esc(s.agent_version) : '<span class="faint">—</span>'} · ${s.node_count} 节点</span>
           <small title="${esc(s.apply_error)}" class="${cfgOk ? '' : 'bad-t'}">${s.last_seen ? (cfgOk ? '配置已同步 ' + esc((s.applied_version || '').slice(0, 6)) : '⚠ ' + esc((s.apply_error || '').slice(0, 40))) : ''}</small>
           <small>${st.core_versions ? Object.entries(st.core_versions).filter(([, v]) => v).map(([k, v]) => `${k === 'singbox' ? 'sing-box' : k} ${esc(v)}${st.core_running && st.core_running[k] ? '' : ' (停)'}`).join(' · ') : ''}</small></div></td>
-        <td>${menu([['edit', '编辑'], ['detail', '详情与命令记录'], ['adopt', '接入原版脚本节点'], ['import', '导入现有节点（由 NodeHub 接管）'], ['token', '重置令牌 / 安装命令'], ['cmd:restart_core', '重启内核'], ['cmd:reload', '重新下发配置'], ['cmd:unlock_test', '解锁检测'], ['cmd:upgrade_agent', '升级 Agent'], ['resetTraffic', '重置本期流量'], ['del', '删除', 'danger']])}</td>
+        <td>${menu([['dualStack', '⚡ 一键双栈 (Hy2 + Reality + CF证书)'], ['edit', '编辑'], ['detail', '详情与命令记录'], ['adopt', '接入原版脚本节点'], ['import', '导入现有节点（由 NodeHub 接管）'], ['token', '重置令牌 / 安装命令'], ['cmd:restart_core', '重启内核'], ['cmd:reload', '重新下发配置'], ['cmd:unlock_test', '解锁检测'], ['cmd:upgrade_agent', '升级 Agent'], ['resetTraffic', '重置本期流量'], ['del', '删除', 'danger']])}</td>
       </tr>`;
     }).join('')}</tbody></table></div>`;
   };
   const cmd = (type) => async (id) => { await api('POST', `/api/servers/${id}/command`, { type }); toast('命令已下发，Agent 下次心跳时执行'); };
   bind(el, {
+    dualCmd: () => showDualStackCommandModal(),
+    dualStack: (id) => { const sv = srvList.find((x) => String(x.id) === String(id)); if (sv) dualStackModal(sv, load); },
     add: () => modal('添加服务器', serverForm(), { ok: async (m) => { const res = await api('POST', '/api/servers', serverPayload(readForm(m))); await load(); showInstall(res); } }),
     edit: async (id) => {
       const { server } = await api('GET', '/api/servers/' + id);
@@ -1041,7 +1107,9 @@ PAGES.settings = async (el) => {
       ${inp('IPQualityScore Key', 'ipcheck_ipqs_key', s.ipcheck_ipqs_key, { hint: '提供真实欺诈分（免费 5000 次/月）' })}${inp('ipapi.is Key', 'ipcheck_ipapiis_key', s.ipcheck_ipapiis_key, { hint: '免费注册 1000 次/天；用于判断双 ISP、机房、滥用' })}
       ${inp('Scamalytics API 地址', 'ipcheck_scamalytics_url', s.ipcheck_scamalytics_url, { ph: 'https://api12.scamalytics.com/v3/你的用户名/' })}${inp('Scamalytics Key', 'ipcheck_scamalytics_key', s.ipcheck_scamalytics_key)}
       ${inp('AbuseIPDB Key', 'ipcheck_abuseipdb_key', s.ipcheck_abuseipdb_key)}${inp('ipinfo Token', 'ipcheck_ipinfo_token', s.ipcheck_ipinfo_token)}`, 'ipcheck')}
-    ${section('证书（DNS 验证）', `${inp('Cloudflare API 令牌', 'cf_api_token', s.cf_api_token, { full: true, hint: '在 Cloudflare「我的个人资料 → API 令牌」创建，权限：区域 · DNS · 编辑，范围选你的域名。只存在面板里，节点选「ACME · DNS 验证」时下发给对应服务器；任何 VPS 都能共用，不需要 80 端口。' })}`, 'cert')}
+    ${section('证书（DNS 验证）', `${inp('Cloudflare API 令牌', 'cf_api_token', s.cf_api_token, { full: true, hint: '在 Cloudflare「我的个人资料 → API 令牌」创建，权限：区域 · DNS · 编辑，范围选你的域名。用于一键双栈自动创建 A 记录与 DNS-01 自动签发证书，无需 80 端口。' })}
+      ${inp('默认根域名（可选）', 'cf_base_domain', s.cf_base_domain || '', { ph: '留空自动从 CF 令牌读取首个可用域名', hint: '一键双栈只填子域前缀（如 jp2）或留空时自动拼接此根域名' })}
+      ${inp('ACME 证书邮箱', 'acme_email', s.acme_email || '', { ph: 'admin@example.com' })}`, 'cert')}
     ${section('通知', `${inp('Telegram Bot Token', 'tg_bot_token', s.tg_bot_token)}${inp('Telegram Chat ID', 'tg_chat_id', s.tg_chat_id)}
       ${inp('推送的事件', 'notify_events', s.notify_events, { full: true, hint: '逗号分隔，* 表示全部' })}<div class="full"><button class="btn sm" data-act="tg">发送测试消息</button></div>`, 'notify')}
     <div class="card"><div class="card-h"><h3>账户安全</h3></div><div class="card-b"><div class="btns"><button class="btn" data-act="pwd">修改密码</button>

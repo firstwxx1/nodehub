@@ -544,3 +544,98 @@ func TestPortalSyncSwitchesToPerUser(t *testing.T) {
 		t.Fatal("versionLess")
 	}
 }
+
+func TestDualStackProvisionWithCloudflare(t *testing.T) {
+	// Mock Cloudflare API v4
+	records := map[string]cfDNSRecord{}
+	cfMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer cf-test-tok" {
+			http.Error(w, `{"success":false,"errors":[{"code":1000,"message":"bad auth"}]}`, 403)
+			return
+		}
+		switch {
+		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/zones") && !strings.Contains(r.URL.Path, "/dns_records"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "result": []cfZone{{ID: "z1", Name: "example.com", Status: "active"}}})
+		case r.Method == "GET" && strings.Contains(r.URL.Path, "/dns_records"):
+			name := r.URL.Query().Get("name")
+			var out []cfDNSRecord
+			if rec, ok := records[name]; ok {
+				out = append(out, rec)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "result": out})
+		case r.Method == "POST" && strings.Contains(r.URL.Path, "/dns_records"):
+			var rec cfDNSRecord
+			_ = json.NewDecoder(r.Body).Decode(&rec)
+			rec.ID = "rec-1"
+			records[rec.Name] = rec
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "result": rec})
+		case r.Method == "PUT" && strings.Contains(r.URL.Path, "/dns_records/"):
+			var rec cfDNSRecord
+			_ = json.NewDecoder(r.Body).Decode(&rec)
+			rec.ID = "rec-1"
+			records[rec.Name] = rec
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "result": rec})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer cfMock.Close()
+	origBase := cfAPIBase
+	cfAPIBase = cfMock.URL
+	defer func() { cfAPIBase = origBase }()
+
+	s, err := New(Options{DataDir: t.TempDir(), AdminPass: "test-pass-123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = s.st.SetSetting("cf_api_token", "cf-test-tok")
+	_ = s.st.SetSetting("acme_email", "ops@example.com")
+	ts := httptest.NewServer(s.middleware(s.mux))
+	defer ts.Close()
+	c := &client{t: t, srv: ts}
+
+	// Verify /dual-stack.sh renders with master URL
+	resp, err := http.Get(ts.URL + "/dual-stack.sh")
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("dual-stack.sh: %v %v", err, resp)
+	}
+	scriptBody, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(scriptBody), ts.URL) || strings.Contains(string(scriptBody), "__MASTER_URL__") {
+		t.Fatalf("dual-stack.sh did not substitute master URL")
+	}
+
+	raw := "nhk_" + util.RandToken(30)
+	_, _ = s.st.CreateAPIKey("prov", raw[:10], util.SHA256Hex(raw), "read,write", "")
+	auth := "Bearer " + raw
+
+	// First call: creates server + CF DNS A record (bare prefix -> jp2.example.com) + Hy2(acme_dns) + VLESS-Reality(tcp)
+	code, out := c.do("POST", "/api/open/v1/provision", auth, map[string]any{
+		"name": "jp2", "region": "JP", "ip": "203.0.113.55", "domain": "jp2",
+	})
+	if code != 200 {
+		t.Fatalf("provision failed %d: %v", code, out)
+	}
+	if out["domain"] != "jp2.example.com" || out["dns_action"] != "created" || out["cert_mode"] != "acme_dns" {
+		t.Fatalf("unexpected domain/dns/cert: %v", out)
+	}
+	if rec := records["jp2.example.com"]; rec.Content != "203.0.113.55" || rec.Proxied {
+		t.Fatalf("CF record mismatch: %+v", rec)
+	}
+	if out["token"] == "" || out["install_command"] == "" {
+		t.Fatalf("missing agent token/install_command: %v", out)
+	}
+	hy2 := out["hy2_node"].(map[string]any)
+	vl := out["vless_node"].(map[string]any)
+	if hy2["protocol"] != "hysteria2" || hy2["core"] != "singbox" || vl["protocol"] != "vless" || vl["core"] != "xray" {
+		t.Fatalf("unexpected nodes: hy2=%v vl=%v", hy2, vl)
+	}
+
+	// Second call for same IP: idempotent, does not duplicate nodes, CF record unchanged
+	code2, out2 := c.do("POST", "/api/open/v1/provision", auth, map[string]any{
+		"name": "jp2", "region": "JP", "ip": "203.0.113.55", "domain": "jp2.example.com",
+	})
+	if code2 != 200 || out2["created_server"] != false || out2["dns_action"] != "unchanged" {
+		t.Fatalf("second provision mismatch %d: %v", code2, out2)
+	}
+}
