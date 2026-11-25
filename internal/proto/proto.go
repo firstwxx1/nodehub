@@ -2,7 +2,7 @@
 package proto
 
 // AgentVersion is bumped whenever the agent changes in a way the master cares about.
-const AgentVersion = "1.3.4"
+const AgentVersion = "1.3.5"
 
 // Heartbeat is sent by the agent every few seconds.
 type Heartbeat struct {

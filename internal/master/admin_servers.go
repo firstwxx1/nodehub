@@ -125,7 +125,7 @@ func (s *Server) handleResetServerToken(w http.ResponseWriter, r *http.Request, 
 	ok(w, map[string]any{"token": token, "install_command": s.installCommand(r, token)})
 }
 
-var allowedCommands = map[string]bool{"restart_core": true, "reload": true, "unlock_test": true, "upgrade_agent": true}
+var allowedCommands = map[string]bool{"restart_core": true, "reload": true, "unlock_test": true, "upgrade_agent": true, "tune_hy2": true}
 
 func (s *Server) handleServerCommand(w http.ResponseWriter, r *http.Request, a *store.Admin) {
 	var req struct{ Type, Arg string }

@@ -137,3 +137,57 @@ func TestSingboxSniffSkipsHysteria2TCP(t *testing.T) {
 		t.Fatalf("tuic inbound should sniff everything, got %q (present=%v)", net, ok)
 	}
 }
+
+func TestEnsureHy2StableQUIC(t *testing.T) {
+	dir := t.TempDir()
+	// Case 1: existing quic section with disablePathMTUDiscovery: false and maxIdleTimeout: 30s
+	p1 := filepath.Join(dir, "c1.yaml")
+	in1 := "listen: :44443\nquic:\n  maxIdleTimeout: 30s\n  disablePathMTUDiscovery: false\n"
+	if err := os.WriteFile(p1, []byte(in1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := EnsureHy2StableQUIC(p1)
+	if err != nil || !changed {
+		t.Fatalf("expected change, got changed=%v err=%v", changed, err)
+	}
+	b1, _ := os.ReadFile(p1)
+	s1 := string(b1)
+	if !containsAll(s1, "maxIdleTimeout: 60s", "disablePathMTUDiscovery: true") {
+		t.Fatalf("unexpected patched config:\n%s", s1)
+	}
+	// Idempotent second call
+	changed2, err := EnsureHy2StableQUIC(p1)
+	if err != nil || changed2 {
+		t.Fatalf("second call should be no-op, got changed=%v err=%v", changed2, err)
+	}
+
+	// Case 2: no quic section at all
+	p2 := filepath.Join(dir, "c2.yaml")
+	if err := os.WriteFile(p2, []byte("listen: :44443\nbandwidth:\n  up: 1 gbps\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	changed3, err := EnsureHy2StableQUIC(p2)
+	if err != nil || !changed3 {
+		t.Fatalf("expected append, got changed=%v err=%v", changed3, err)
+	}
+	b2, _ := os.ReadFile(p2)
+	if !containsAll(string(b2), "quic:", "maxIdleTimeout: 60s", "disablePathMTUDiscovery: true") {
+		t.Fatalf("unexpected appended config:\n%s", string(b2))
+	}
+}
+
+func containsAll(s string, subs ...string) bool {
+	for _, sub := range subs {
+		found := false
+		for i := 0; i+len(sub) <= len(s); i++ {
+			if s[i:i+len(sub)] == sub {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}

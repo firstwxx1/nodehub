@@ -459,8 +459,24 @@ func TestHy2ClientBandwidth(t *testing.T) {
 		t.Fatalf("sing-box bandwidth: %v", o)
 	}
 	sn.UpMbps, sn.DownMbps = 0, 0
-	if _, ok := clashProxy(sn, &store.User{})["down"]; ok {
+	p0 := clashProxy(sn, &store.User{})
+	if _, ok := p0["down"]; ok {
 		t.Fatal("no bandwidth must be written when unset")
+	}
+	if p0["disable-mtu-discovery"] != true {
+		t.Fatalf("clash hysteria2 must set disable-mtu-discovery=true, got %v", p0)
+	}
+	n.Settings.HopPorts = "20000-40000"
+	pHop := clashProxy(sn, &store.User{})
+	if pHop["hop-interval"] != 60 {
+		t.Fatalf("clash hysteria2 hop-interval want 60, got %v", pHop["hop-interval"])
+	}
+	if oHop := singboxOutbound(sn, &store.User{}); oHop["hop_interval"] != "60s" {
+		t.Fatalf("singbox hysteria2 hop_interval want 60s, got %v", oHop["hop_interval"])
+	}
+	clashYAML := renderClash([]subNode{sn}, &store.User{}, "x", false)
+	if strings.Contains(clashYAML, "cloudflare-dns.com") || strings.Contains(clashYAML, "dns.google") {
+		t.Fatalf("renderClash must not configure direct blocked foreign DoH:\n%s", clashYAML)
 	}
 }
 

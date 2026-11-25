@@ -702,6 +702,13 @@ func (a *Agent) runCommand(c proto.Command) {
 			res.OK = false
 			res.Output = err.Error() + "\n" + out
 		}
+	case "tune_hy2":
+		out, err := TuneHy2QUIC()
+		res.Output = out
+		if err != nil {
+			res.OK = false
+			res.Output = err.Error()
+		}
 	case "upgrade_agent":
 		if err := a.upgradeSelf(); err != nil {
 			res.OK, res.Output = false, err.Error()

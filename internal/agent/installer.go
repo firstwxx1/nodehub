@@ -150,12 +150,98 @@ func InstallHy2(arg string) (string, error) {
 	if exec.Command("systemctl", "is-active", "--quiet", "hysteria-server.service").Run() != nil {
 		return "", fmt.Errorf("脚本执行完了，但 hysteria-server 没有在运行\n%s", log)
 	}
+	if tuneMsg, tuneErr := TuneHy2QUIC(); tuneErr != nil {
+		log = tailLog([]byte(log+"\n[quic-tune warn] "+tuneErr.Error()), 3500)
+	} else if tuneMsg != "" {
+		log = tailLog([]byte(log+"\n[quic-tune] "+tuneMsg), 3500)
+	}
 	scan, err := ScanHysteria2Installer()
 	if err != nil {
 		return "", fmt.Errorf("安装完成但读取结果失败: %v\n%s", err, log)
 	}
 	b, _ := json.Marshal(InstallResult{Scan: scan, Log: log})
 	return string(b), nil
+}
+
+const hy2StableQUICBlock = `
+# QUIC 流控与移动网稳定参数（关闭 PMTUD 防 4G/5G 热点丢大包，放宽空闲超时）
+quic:
+  initStreamReceiveWindow: 8388608
+  maxStreamReceiveWindow: 8388608
+  initConnReceiveWindow: 20971520
+  maxConnReceiveWindow: 20971520
+  maxIdleTimeout: 60s
+  maxIncomingStreams: 1024
+  disablePathMTUDiscovery: true
+`
+
+var (
+	reDisablePMTUDFalse = regexp.MustCompile(`(?m)^([ \t]*disablePathMTUDiscovery:[ \t]*)false\b`)
+	reMaxIdleTimeout    = regexp.MustCompile(`(?m)^([ \t]*maxIdleTimeout:[ \t]*)(?:[1-5]?[0-9]s)\b`)
+	reQuicHeader        = regexp.MustCompile(`(?m)^quic:\s*$`)
+)
+
+// EnsureHy2StableQUIC patches a hysteria2 config file in place so Path MTU Discovery is
+// disabled and maxIdleTimeout is at least 60s. Returns whether the file was modified.
+func EnsureHy2StableQUIC(confPath string) (bool, error) {
+	raw, err := os.ReadFile(confPath)
+	if err != nil {
+		return false, err
+	}
+	orig := string(raw)
+	next := orig
+	if reQuicHeader.MatchString(next) {
+		next = reDisablePMTUDFalse.ReplaceAllString(next, "${1}true")
+		if !strings.Contains(next, "disablePathMTUDiscovery:") {
+			next = reQuicHeader.ReplaceAllString(next, "quic:\n  disablePathMTUDiscovery: true")
+		}
+		next = reMaxIdleTimeout.ReplaceAllString(next, "${1}60s")
+		if !strings.Contains(next, "maxIdleTimeout:") {
+			next = reQuicHeader.ReplaceAllString(next, "quic:\n  maxIdleTimeout: 60s")
+		}
+	} else {
+		next = strings.TrimRight(next, "\n") + "\n" + hy2StableQUICBlock
+	}
+	if next == orig {
+		return false, nil
+	}
+	info, _ := os.Stat(confPath)
+	mode := os.FileMode(0o600)
+	if info != nil {
+		mode = info.Mode().Perm()
+	}
+	tmp := confPath + ".tmp"
+	if err := os.WriteFile(tmp, []byte(next), mode); err != nil {
+		return false, err
+	}
+	if err := os.Rename(tmp, confPath); err != nil {
+		_ = os.Remove(tmp)
+		return false, err
+	}
+	return true, nil
+}
+
+// TuneHy2QUIC applies EnsureHy2StableQUIC to the standard hysteria2-installer config and
+// restarts hysteria-server only if changes were written.
+func TuneHy2QUIC() (string, error) {
+	conf := hy2Dir + "/config.yaml"
+	if _, err := os.Stat(conf); err != nil {
+		if os.IsNotExist(err) {
+			return "no hysteria2 config on this host (skipped)", nil
+		}
+		return "", err
+	}
+	changed, err := EnsureHy2StableQUIC(conf)
+	if err != nil {
+		return "", fmt.Errorf("修改 %s 失败: %w", conf, err)
+	}
+	if !changed {
+		return "already tuned (disablePathMTUDiscovery=true, maxIdleTimeout=60s)", nil
+	}
+	if out, err := exec.Command("systemctl", "restart", "hysteria-server.service").CombinedOutput(); err != nil {
+		return "", fmt.Errorf("重启 hysteria-server 失败: %v %s", err, tailLog(out, 300))
+	}
+	return "patched disablePathMTUDiscovery=true & maxIdleTimeout=60s, restarted hysteria-server", nil
 }
 
 // UninstallHy2 runs `install.sh uninstall` (with every confirmation answered yes).

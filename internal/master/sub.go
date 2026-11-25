@@ -331,10 +331,13 @@ func clashProxy(sn subNode, u *store.User) map[string]any {
 		p["password"] = sn.pw(u)
 		if st.HopPorts != "" {
 			p["ports"] = st.HopPorts
-			p["hop-interval"] = 30
+			p["hop-interval"] = 60
 		}
 		p["sni"] = st.SNI
 		p["skip-cert-verify"] = insecure(n)
+		// Disable QUIC PMTUD on clients so cellular / CGNAT / Wi-Fi hotspots (MTU ~1400-1440)
+		// do not silently blackhole 1438-1449B UDP packets and stall the tunnel.
+		p["disable-mtu-discovery"] = true
 		if st.Obfs == "salamander" {
 			p["obfs"] = "salamander"
 			p["obfs-password"] = st.ObfsPassword
@@ -395,7 +398,7 @@ func classifyNodes(nodes []subNode) (tw, jp, us, sg, other []string, all []strin
 			tw = append(tw, sn.Name)
 		case c == "JP" || strings.Contains(nm, "日本") || strings.Contains(nm, "东京") || strings.Contains(nm, "東京") || strings.Contains(nm, "大阪") || strings.Contains(nm, "阿里云") || strings.Contains(nm, "腾讯云"):
 			jp = append(jp, sn.Name)
-		case c == "US" || strings.Contains(nm, "美国") || strings.Contains(nm, "美") || strings.Contains(nm, "racknerd") || strings.Contains(nm, "servercheap"):
+		case c == "US" || strings.Contains(nm, "美国") || strings.Contains(nm, "美") || strings.Contains(strings.ToLower(nm), "racknerd") || strings.Contains(strings.ToLower(nm), "servercheap") || strings.Contains(strings.ToLower(nm), "chicago"):
 			us = append(us, sn.Name)
 		case c == "SG" || strings.Contains(nm, "新加坡") || strings.Contains(nm, "kamatera"):
 			sg = append(sg, sn.Name)
@@ -425,7 +428,7 @@ func renderClash(nodes []subNode, u *store.User, site string, smart bool) string
 	sb.WriteString("dns:\n  enable: true\n  ipv6: false\n  prefer-h3: false\n  enhanced-mode: fake-ip\n  fake-ip-range: 198.18.0.1/16\n  default-nameserver:\n    - 223.5.5.5\n    - 119.29.29.29\n")
 	sb.WriteString("  nameserver:\n    - https://dns.alidns.com/dns-query\n    - https://doh.pub/dns-query\n")
 	sb.WriteString("  proxy-server-nameserver:\n    - https://dns.alidns.com/dns-query\n    - https://doh.pub/dns-query\n")
-	sb.WriteString("  nameserver-policy:\n    \"geosite:geolocation-!cn\":\n      - https://cloudflare-dns.com/dns-query\n      - https://dns.google/dns-query\n\n")
+	sb.WriteString("  fake-ip-filter:\n    - \"*.lan\"\n    - \"*.local\"\n    - \"*.localhost\"\n    - \"time.*.com\"\n    - \"ntp.*.com\"\n    - \"+.stun.*.*\"\n    - \"+.stun.*.*.*\"\n    - \"+.msftncsi.com\"\n    - \"+.msftconnecttest.com\"\n\n")
 	sb.WriteString("sniffer:\n  enable: true\n  parse-pure-ip: true\n  force-dns-mapping: true\n  override-destination: true\n  sniff:\n    HTTP:\n      ports: [80, 8080-8880]\n    TLS:\n      ports: [443, 8443]\n    QUIC:\n      ports: [443, 8443]\n  skip-domain:\n    - \"+.push.apple.com\"\n    - \"+.mijia.cloud\"\n\n")
 
 	sb.WriteString("proxies:\n")
@@ -616,7 +619,7 @@ func singboxOutbound(sn subNode, u *store.User) map[string]any {
 		o["type"], o["password"] = "hysteria2", sn.pw(u)
 		if st.HopPorts != "" {
 			o["server_ports"] = []string{strings.Replace(st.HopPorts, "-", ":", 1)}
-			o["hop_interval"] = "30s"
+			o["hop_interval"] = "60s"
 		}
 		o["tls"] = tls([]string{"h3"})
 		if st.Obfs == "salamander" {
@@ -807,7 +810,7 @@ func surgeLine(sn subNode, u *store.User) string {
 	case "hysteria2":
 		hop := ""
 		if st.HopPorts != "" {
-			hop = ", port-hopping=" + st.HopPorts + ", port-hopping-interval=30"
+			hop = ", port-hopping=" + st.HopPorts + ", port-hopping-interval=60"
 		}
 		bw := ""
 		if sn.DownMbps > 0 {
