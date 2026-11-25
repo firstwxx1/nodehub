@@ -492,23 +492,36 @@ async function showDualStackCommandModal() {
       <button type="button" class="btn" id="genDsKey">一键生成专用 API Key</button>
     </div>`;
   const m = modal('新机一键双栈命令（Hy2 + Reality + CF 证书）', body, { wide: true, cancelText: '关闭' });
+  const root = m.el;
+  const shEsc = (v) => String(v || '').replace(/'/g, "'\\''");
   const renderCmd = () => {
-    const f = readForm(m);
+    const f = readForm(root);
     const key = f.api_key || '<你的_API_KEY>';
-    let cmd = `curl -fsSL ${baseUrl}/dual-stack.sh | bash -s -- --key '${key}' --name '${f.name || '新服务器'}'`;
-    if (f.domain) cmd += ` --domain '${f.domain}'`;
+    let cmd = `curl -fsSL ${baseUrl}/dual-stack.sh | bash -s -- --key '${shEsc(key)}' --name '${shEsc(f.name || '新服务器')}'`;
+    if (f.domain) cmd += ` --domain '${shEsc(f.domain)}'`;
     if (f.hy2_port && Number(f.hy2_port) !== 44443) cmd += ` --hy2-port ${f.hy2_port}`;
     if (f.tcp_port && Number(f.tcp_port) !== Number(f.hy2_port || 44443)) cmd += ` --tcp-port ${f.tcp_port}`;
-    m.querySelector('#dsCmd').textContent = cmd;
+    root.querySelector('#dsCmd').textContent = cmd;
   };
-  m.querySelectorAll('input').forEach((el) => { el.oninput = renderCmd; });
+  root.querySelectorAll('input').forEach((el) => { el.oninput = renderCmd; });
   renderCmd();
-  m.querySelector('#copyDsCmd').onclick = () => copy(m.querySelector('#dsCmd').textContent);
-  m.querySelector('#genDsKey').onclick = async () => {
-    const r = await api('POST', '/api/apikeys', { name: 'dual-stack-' + new Date().toISOString().slice(0, 10), scopes: 'read,write', enabled: true });
-    m.querySelector('[name="api_key"]').value = r.key;
-    renderCmd();
-    toast('已自动创建专用 API Key 并填入命令（请妥善保存）');
+  root.querySelector('#copyDsCmd').onclick = () => copy(root.querySelector('#dsCmd').textContent);
+  const genBtn = root.querySelector('#genDsKey');
+  genBtn.onclick = async () => {
+    genBtn.disabled = true;
+    const oldText = genBtn.textContent;
+    genBtn.textContent = '生成中…';
+    try {
+      const r = await api('POST', '/api/apikeys', { name: 'dual-stack-' + new Date().toISOString().slice(0, 10), scopes: 'read,write' });
+      root.querySelector('[name="api_key"]').value = r.key;
+      renderCmd();
+      toast('已自动创建专用 API Key 并填入命令（请妥善保存）');
+    } catch (err) {
+      fail(err);
+    } finally {
+      genBtn.disabled = false;
+      genBtn.textContent = oldText;
+    }
   };
 }
 
