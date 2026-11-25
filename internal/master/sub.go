@@ -370,14 +370,47 @@ func yamlStr(v any) string {
 	return string(b)
 }
 
-// smartRules: "global" (default) sends everything but the LAN through the proxy, like a single imported
-// node; "smart" sends mainland-China sites DIRECT. ?rules=smart|global overrides the sub_rule_mode setting.
+// smartRules: "smart" (default) sends mainland-China sites & CN CDNs DIRECT while routing
+// overseas / AI / developer / streaming traffic cleanly; "global" sends everything except LAN
+// through the proxy. ?rules=smart|global overrides the sub_rule_mode setting.
 func (s *Server) smartRules(r *http.Request) bool {
 	m := r.URL.Query().Get("rules")
 	if m == "" {
-		m = s.st.SettingOr("sub_rule_mode", "global")
+		m = s.st.SettingOr("sub_rule_mode", "smart")
 	}
 	return m == "smart"
+}
+
+var netCheckExactDomains = []string{
+	"ipinfo.io", "api.ipify.org", "api64.ipify.org",
+	"ifconfig.me", "icanhazip.com", "ip.sb", "api.ip.sb",
+}
+
+var netCheckSuffixDomains = []string{
+	"dnsleaktest.com", "ipleak.net", "browserleaks.com",
+	"ping0.cc", "scamalytics.com", "ip.skk.moe", "whoer.net", "ipapi.is",
+}
+
+// aiProxyDomains ensures AI coding / LLM APIs (including Google Antigravity, Gemini, Claude,
+// OpenAI, Cursor, Copilot, Grok, Perplexity) always match the dedicated AI group BEFORE broader
+// Google / GitHub / Microsoft rules.
+var aiProxyDomains = []string{
+	"antigravity.google", "cloudcode-pa.googleapis.com", "daily-cloudcode-pa.sandbox.googleapis.com",
+	"gemini.google.com", "aistudio.google.com", "generativelanguage.googleapis.com",
+	"alkalimakersuite-pa.clients6.google.com", "makersuite.google.com",
+	"notebooklm.google.com", "notebooklm.google", "labs.google", "deepmind.com", "deepmind.google",
+	"anthropic.com", "claude.ai", "claude.com", "clau.de",
+	"openai.com", "chatgpt.com", "oaistatic.com", "oaiusercontent.com", "sora.com",
+	"cursor.sh", "cursor.com", "cursor-cdn.com", "windsurf.com", "codeium.com",
+	"githubcopilot.com", "copilot.github.com", "copilot.microsoft.com",
+	"perplexity.ai", "x.ai", "grok.com", "openrouter.ai", "groq.com",
+	"huggingface.co", "hf.co", "poe.com", "midjourney.com", "elevenlabs.io", "civitai.com", "cerebras.ai",
+}
+
+var devProxyDomains = []string{
+	"ghcr.io", "docker.io", "docker.com", "gcr.io", "quay.io",
+	"npmjs.org", "pypi.org", "crates.io", "golang.org", "go.dev", "brew.sh",
+	"cloudflare.com", "workers.dev", "pages.dev", "vercel.com", "vercel.app", "supabase.co", "jsdelivr.net",
 }
 
 var searchBypassDomains = []string{
@@ -388,31 +421,133 @@ var searchBypassDomains = []string{
 	"ecosia.org", "qwant.com", "mojeek.com",
 }
 
-func classifyNodes(nodes []subNode) (tw, jp, us, sg, other []string, all []string) {
+type regionBucket struct {
+	Key   string
+	Name  string
+	Nodes []string
+}
+
+type nodeCatalog struct {
+	Regions []regionBucket
+	UDP     []string
+	TCP     []string
+	All     []string
+}
+
+func (c nodeCatalog) hasDualStack() bool { return len(c.UDP) > 0 && len(c.TCP) > 0 }
+
+func (c nodeCatalog) regionNames(prefer ...string) []string {
+	byKey := make(map[string]string, len(c.Regions))
+	for _, r := range c.Regions {
+		byKey[r.Key] = r.Name
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, k := range prefer {
+		if nm, ok := byKey[k]; ok && !seen[nm] {
+			out = append(out, nm)
+			seen[nm] = true
+		}
+	}
+	for _, r := range c.Regions {
+		if !seen[r.Name] {
+			out = append(out, r.Name)
+			seen[r.Name] = true
+		}
+	}
+	return out
+}
+
+func dedupStrings(groups ...[]string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, g := range groups {
+		for _, s := range g {
+			if s == "" || seen[s] {
+				continue
+			}
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+var euCountryCodes = map[string]bool{
+	"SE": true, "DE": true, "NL": true, "GB": true, "UK": true, "FR": true,
+	"CH": true, "FI": true, "NO": true, "IE": true, "IT": true, "ES": true,
+	"PL": true, "AT": true, "BE": true, "LU": true, "CZ": true, "DK": true,
+	"PT": true, "RO": true, "BG": true, "EE": true, "LV": true, "LT": true, "IS": true,
+}
+
+func detectRegionKey(sn subNode) string {
+	// Always trust explicit ISO-2 country code first so vendor names never misclassify nodes.
+	switch strings.ToUpper(strings.TrimSpace(sn.Country)) {
+	case "HK":
+		return "HK"
+	case "TW":
+		return "TW"
+	case "JP":
+		return "JP"
+	case "SG":
+		return "SG"
+	case "US":
+		return "US"
+	case "KR":
+		return "KR"
+	default:
+		if euCountryCodes[strings.ToUpper(strings.TrimSpace(sn.Country))] {
+			return "EU"
+		}
+	}
+	nm := sn.Name
+	low := strings.ToLower(nm)
+	switch {
+	case strings.Contains(nm, "香港") || strings.Contains(nm, "HK"):
+		return "HK"
+	case strings.Contains(nm, "台湾") || strings.Contains(nm, "台灣") || strings.Contains(nm, "TW"):
+		return "TW"
+	case strings.Contains(nm, "日本") || strings.Contains(nm, "东京") || strings.Contains(nm, "東京") || strings.Contains(nm, "大阪") || strings.Contains(nm, "JP"):
+		return "JP"
+	case strings.Contains(nm, "新加坡") || strings.Contains(nm, "狮城") || strings.Contains(nm, "SG"):
+		return "SG"
+	case strings.Contains(nm, "美国") || strings.Contains(nm, "美國") || strings.Contains(nm, "洛杉矶") || strings.Contains(nm, "圣何塞") || strings.Contains(nm, "纽约") || strings.Contains(nm, "芝加哥") || strings.Contains(low, "racknerd") || strings.Contains(low, "servercheap") || strings.Contains(low, "chicago"):
+		return "US"
+	case strings.Contains(nm, "韩国") || strings.Contains(nm, "韓國") || strings.Contains(nm, "首尔") || strings.Contains(nm, "KR"):
+		return "KR"
+	case strings.Contains(nm, "瑞典") || strings.Contains(nm, "德国") || strings.Contains(nm, "德國") || strings.Contains(nm, "荷兰") || strings.Contains(nm, "荷蘭") || strings.Contains(nm, "英国") || strings.Contains(nm, "英國") || strings.Contains(nm, "法国") || strings.Contains(nm, "法國") || strings.Contains(nm, "欧洲") || strings.Contains(nm, "歐洲"):
+		return "EU"
+	default:
+		return "OTHER"
+	}
+}
+
+func classifySubNodes(nodes []subNode) nodeCatalog {
+	order := []struct{ key, name string }{
+		{"HK", "香港"}, {"TW", "台湾"}, {"JP", "日本"}, {"SG", "新加坡"},
+		{"US", "美国"}, {"KR", "韩国"}, {"EU", "欧洲"}, {"OTHER", "其他地区"},
+	}
+	buckets := map[string][]string{}
+	var cat nodeCatalog
 	for _, sn := range nodes {
-		all = append(all, sn.Name)
-		c := strings.ToUpper(sn.Country)
-		nm := sn.Name
-		switch {
-		case c == "TW" || strings.Contains(nm, "台湾") || strings.Contains(nm, "台灣") || strings.Contains(nm, "TW"):
-			tw = append(tw, sn.Name)
-		case c == "JP" || strings.Contains(nm, "日本") || strings.Contains(nm, "东京") || strings.Contains(nm, "東京") || strings.Contains(nm, "大阪") || strings.Contains(nm, "阿里云") || strings.Contains(nm, "腾讯云"):
-			jp = append(jp, sn.Name)
-		case c == "US" || strings.Contains(nm, "美国") || strings.Contains(nm, "美") || strings.Contains(strings.ToLower(nm), "racknerd") || strings.Contains(strings.ToLower(nm), "servercheap") || strings.Contains(strings.ToLower(nm), "chicago"):
-			us = append(us, sn.Name)
-		case c == "SG" || strings.Contains(nm, "新加坡") || strings.Contains(nm, "kamatera"):
-			sg = append(sg, sn.Name)
-		default:
-			other = append(other, sn.Name)
+		cat.All = append(cat.All, sn.Name)
+		k := detectRegionKey(sn)
+		buckets[k] = append(buckets[k], sn.Name)
+		if sn.Node != nil {
+			switch sn.Node.Protocol {
+			case "hysteria2", "tuic":
+				cat.UDP = append(cat.UDP, sn.Name)
+			default:
+				cat.TCP = append(cat.TCP, sn.Name)
+			}
 		}
 	}
-	fallback := func(list []string) []string {
-		if len(list) == 0 {
-			return all
+	for _, spec := range order {
+		if list := buckets[spec.key]; len(list) > 0 {
+			cat.Regions = append(cat.Regions, regionBucket{Key: spec.key, Name: spec.name, Nodes: list})
 		}
-		return list
 	}
-	return fallback(tw), fallback(jp), fallback(us), fallback(sg), fallback(other), all
+	return cat
 }
 
 func renderClash(nodes []subNode, u *store.User, site string, smart bool) string {
@@ -426,10 +561,11 @@ func renderClash(nodes []subNode, u *store.User, site string, smart bool) string
 	sb.WriteString("  geosite: \"https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat\"\n")
 	sb.WriteString("  mmdb: \"https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/country.mmdb\"\n\n")
 	sb.WriteString("dns:\n  enable: true\n  ipv6: false\n  prefer-h3: false\n  enhanced-mode: fake-ip\n  fake-ip-range: 198.18.0.1/16\n  default-nameserver:\n    - 223.5.5.5\n    - 119.29.29.29\n")
+	sb.WriteString("  direct-nameserver:\n    - 223.5.5.5\n    - 119.29.29.29\n")
 	sb.WriteString("  nameserver:\n    - https://dns.alidns.com/dns-query\n    - https://doh.pub/dns-query\n")
 	sb.WriteString("  proxy-server-nameserver:\n    - https://dns.alidns.com/dns-query\n    - https://doh.pub/dns-query\n")
-	sb.WriteString("  fake-ip-filter:\n    - \"*.lan\"\n    - \"*.local\"\n    - \"*.localhost\"\n    - \"time.*.com\"\n    - \"ntp.*.com\"\n    - \"+.stun.*.*\"\n    - \"+.stun.*.*.*\"\n    - \"+.msftncsi.com\"\n    - \"+.msftconnecttest.com\"\n\n")
-	sb.WriteString("sniffer:\n  enable: true\n  parse-pure-ip: true\n  force-dns-mapping: true\n  override-destination: true\n  sniff:\n    HTTP:\n      ports: [80, 8080-8880]\n    TLS:\n      ports: [443, 8443]\n    QUIC:\n      ports: [443, 8443]\n  skip-domain:\n    - \"+.push.apple.com\"\n    - \"+.mijia.cloud\"\n\n")
+	sb.WriteString("  fake-ip-filter:\n    - \"geosite:private\"\n    - \"geosite:connectivity-check\"\n    - \"*.lan\"\n    - \"*.local\"\n    - \"*.localhost\"\n    - \"*.localdomain\"\n    - \"time.*.com\"\n    - \"time.*.gov\"\n    - \"time.*.edu.cn\"\n    - \"time.*.apple.com\"\n    - \"ntp.*.com\"\n    - \"*.ntp.org.cn\"\n    - \"+.pool.ntp.org\"\n    - \"+.stun.*.*\"\n    - \"+.stun.*.*.*\"\n    - \"+.stun.*.*.*.*\"\n    - \"+.msftncsi.com\"\n    - \"+.msftconnecttest.com\"\n    - \"localhost.ptlogin2.qq.com\"\n    - \"localhost.sec.qq.com\"\n    - \"+.srv.nintendo.net\"\n    - \"+.stun.playstation.net\"\n    - \"xbox.*.microsoft.com\"\n    - \"+.xboxlive.com\"\n    - \"*.battlenet.com.cn\"\n    - \"*.wotgame.cn\"\n    - \"*.wggames.cn\"\n    - \"*.wowsgame.cn\"\n    - \"+.market.xiaomi.com\"\n    - \"+.tailscale.com\"\n    - \"*.ts.net\"\n\n")
+	sb.WriteString("sniffer:\n  enable: true\n  parse-pure-ip: true\n  force-dns-mapping: true\n  override-destination: true\n  sniff:\n    HTTP:\n      ports: [80, 8080-8880]\n    TLS:\n      ports: [443, 8443]\n    QUIC:\n      ports: [443, 8443]\n  skip-domain:\n    - \"+.push.apple.com\"\n    - \"+.mijia.cloud\"\n    - \"+.wechat.com\"\n    - \"+.qpic.cn\"\n    - \"+.qq.com\"\n\n")
 
 	sb.WriteString("proxies:\n")
 	var validNodes []subNode
@@ -442,92 +578,147 @@ func renderClash(nodes []subNode, u *store.User, site string, smart bool) string
 		validNodes = append(validNodes, sn)
 	}
 
-	tw, jp, us, sg, other, names := classifyNodes(validNodes)
+	cat := classifySubNodes(validNodes)
+	names := cat.All
 	if len(names) == 0 {
 		names = []string{"DIRECT"}
-		tw, jp, us, sg, other = names, names, names, names, names
 	}
 
 	sel := "一键代理"
 	auto := "自动选择"
 	fb := "故障转移"
+	udpGrp := "⚡ 高速 UDP"
+	tcpGrp := "🛡️ 稳定 TCP"
 	direct := "国内直连"
+	dual := cat.hasDualStack()
+
+	protoGroups := []string{}
+	if dual {
+		protoGroups = []string{udpGrp, tcpGrp}
+	}
+	allRegions := cat.regionNames()
+	aiRegions := cat.regionNames("US", "JP", "TW", "SG", "KR", "EU", "OTHER")
+	ttRegions := cat.regionNames("JP", "US", "TW", "SG", "KR", "EU", "OTHER")
+	tgRegions := cat.regionNames("SG", "JP", "TW", "US", "HK", "EU", "OTHER")
+	mediaRegions := cat.regionNames("TW", "JP", "US", "SG", "HK", "EU", "OTHER")
 
 	sb.WriteString("proxy-groups:\n")
-	// 一键代理
-	topList := append([]string{auto, fb, "台湾", "日本", "美国", "新加坡", "其他地区", direct}, names...)
+	// 1. 核心调度组
+	topList := dedupStrings([]string{auto, fb}, protoGroups, allRegions, []string{direct}, names)
 	sb.WriteString("  - " + yamlStr(map[string]any{"name": sel, "type": "select", "proxies": topList}) + "\n")
-	// 自动选择 & 故障转移（lazy=true 避免未选中分组持续消耗后台探测流量）
-	sb.WriteString("  - " + yamlStr(map[string]any{"name": auto, "type": "url-test", "url": "https://www.gstatic.com/generate_204", "interval": 300, "tolerance": 50, "lazy": true, "proxies": names}) + "\n")
-	sb.WriteString("  - " + yamlStr(map[string]any{"name": fb, "type": "fallback", "url": "https://www.gstatic.com/generate_204", "interval": 300, "lazy": true, "proxies": names}) + "\n")
+	sb.WriteString("  - " + yamlStr(map[string]any{"name": auto, "type": "url-test", "url": "https://www.gstatic.com/generate_204", "interval": 180, "tolerance": 50, "lazy": true, "proxies": names}) + "\n")
+	fbProxies := names
+	if dual {
+		// 正常优先高速 UDP（Hy2），运营商限速/阻断 UDP 时自动无缝切至稳定 TCP（Reality）
+		fbProxies = []string{udpGrp, tcpGrp}
+	}
+	sb.WriteString("  - " + yamlStr(map[string]any{"name": fb, "type": "fallback", "url": "https://www.gstatic.com/generate_204", "interval": 120, "lazy": true, "proxies": fbProxies}) + "\n")
+	if dual {
+		sb.WriteString("  - " + yamlStr(map[string]any{"name": udpGrp, "type": "url-test", "url": "https://www.gstatic.com/generate_204", "interval": 180, "tolerance": 50, "lazy": true, "proxies": cat.UDP}) + "\n")
+		sb.WriteString("  - " + yamlStr(map[string]any{"name": tcpGrp, "type": "url-test", "url": "https://www.gstatic.com/generate_204", "interval": 180, "tolerance": 50, "lazy": true, "proxies": cat.TCP}) + "\n")
+	}
 
-	// 业务分流
-	stdBusiness := []string{sel, "台湾", "日本", "美国", "新加坡", "其他地区", direct}
-	sb.WriteString("  - " + yamlStr(map[string]any{"name": "AI", "type": "select", "proxies": []string{"美国", "日本", "台湾", "新加坡", "其他地区", sel, direct}}) + "\n")
+	// 2. 精准业务分流组
+	stdBusiness := dedupStrings([]string{sel}, protoGroups, allRegions, []string{direct})
+	aiTail := []string{sel, direct}
+	if dual {
+		aiTail = []string{tcpGrp, udpGrp, sel, direct}
+	}
+	sb.WriteString("  - " + yamlStr(map[string]any{"name": "AI", "type": "select", "proxies": dedupStrings(aiRegions, aiTail)}) + "\n")
 	sb.WriteString("  - " + yamlStr(map[string]any{"name": "YouTube", "type": "select", "proxies": stdBusiness}) + "\n")
 	sb.WriteString("  - " + yamlStr(map[string]any{"name": "Google", "type": "select", "proxies": stdBusiness}) + "\n")
-	sb.WriteString("  - " + yamlStr(map[string]any{"name": "GitHub", "type": "select", "proxies": stdBusiness}) + "\n")
-	sb.WriteString("  - " + yamlStr(map[string]any{"name": "Netflix", "type": "select", "proxies": stdBusiness}) + "\n")
-	sb.WriteString("  - " + yamlStr(map[string]any{"name": "Spotify", "type": "select", "proxies": stdBusiness}) + "\n")
+	ghOpts := stdBusiness
+	if dual {
+		ghOpts = dedupStrings([]string{sel, tcpGrp, udpGrp}, allRegions, []string{direct})
+	}
+	sb.WriteString("  - " + yamlStr(map[string]any{"name": "GitHub", "type": "select", "proxies": ghOpts}) + "\n")
+	sb.WriteString("  - " + yamlStr(map[string]any{"name": "国际流媒体", "type": "select", "proxies": dedupStrings([]string{sel}, mediaRegions, protoGroups, []string{direct})}) + "\n")
+	sb.WriteString("  - " + yamlStr(map[string]any{"name": "Telegram", "type": "select", "proxies": dedupStrings([]string{sel}, tgRegions, protoGroups, []string{direct})}) + "\n")
+	sb.WriteString("  - " + yamlStr(map[string]any{"name": "TikTok", "type": "select", "proxies": dedupStrings(ttRegions, []string{sel}, protoGroups, []string{direct})}) + "\n")
 	sb.WriteString("  - " + yamlStr(map[string]any{"name": "Steam", "type": "select", "proxies": stdBusiness}) + "\n")
-	sb.WriteString("  - " + yamlStr(map[string]any{"name": "Telegram", "type": "select", "proxies": stdBusiness}) + "\n")
-	sb.WriteString("  - " + yamlStr(map[string]any{"name": "TikTok", "type": "select", "proxies": []string{"日本", "美国", "台湾", "新加坡", "其他地区", sel, direct}}) + "\n")
-	sb.WriteString("  - " + yamlStr(map[string]any{"name": "Apple", "type": "select", "proxies": []string{direct, sel, "台湾", "日本", "美国", "新加坡", "其他地区"}}) + "\n")
-	sb.WriteString("  - " + yamlStr(map[string]any{"name": "Microsoft", "type": "select", "proxies": []string{direct, sel, "台湾", "日本", "美国", "新加坡", "其他地区"}}) + "\n")
+	sb.WriteString("  - " + yamlStr(map[string]any{"name": "Apple", "type": "select", "proxies": dedupStrings([]string{direct, sel}, allRegions)}) + "\n")
+	sb.WriteString("  - " + yamlStr(map[string]any{"name": "Microsoft", "type": "select", "proxies": dedupStrings([]string{direct, sel}, allRegions)}) + "\n")
 	sb.WriteString("  - " + yamlStr(map[string]any{"name": "网络检测", "type": "select", "proxies": stdBusiness}) + "\n")
 
-	// 地区节点组 (url-test, lazy=true)
-	sb.WriteString("  - " + yamlStr(map[string]any{"name": "台湾", "type": "url-test", "url": "https://www.gstatic.com/generate_204", "interval": 300, "tolerance": 50, "lazy": true, "proxies": tw}) + "\n")
-	sb.WriteString("  - " + yamlStr(map[string]any{"name": "日本", "type": "url-test", "url": "https://www.gstatic.com/generate_204", "interval": 300, "tolerance": 50, "lazy": true, "proxies": jp}) + "\n")
-	sb.WriteString("  - " + yamlStr(map[string]any{"name": "美国", "type": "url-test", "url": "https://www.gstatic.com/generate_204", "interval": 300, "tolerance": 50, "lazy": true, "proxies": us}) + "\n")
-	sb.WriteString("  - " + yamlStr(map[string]any{"name": "新加坡", "type": "url-test", "url": "https://www.gstatic.com/generate_204", "interval": 300, "tolerance": 50, "lazy": true, "proxies": sg}) + "\n")
-	sb.WriteString("  - " + yamlStr(map[string]any{"name": "其他地区", "type": "url-test", "url": "https://www.gstatic.com/generate_204", "interval": 300, "tolerance": 50, "lazy": true, "proxies": other}) + "\n")
+	// 3. 真实地区分组（仅展示有节点的地区，避免出现空地区兜底组）
+	for _, r := range cat.Regions {
+		sb.WriteString("  - " + yamlStr(map[string]any{"name": r.Name, "type": "url-test", "url": "https://www.gstatic.com/generate_204", "interval": 180, "tolerance": 50, "lazy": true, "proxies": r.Nodes}) + "\n")
+	}
 	sb.WriteString("  - " + yamlStr(map[string]any{"name": direct, "type": "select", "proxies": []string{"DIRECT"}}) + "\n")
 
 	sb.WriteString("rules:\n")
 	rules := []string{
+		// 1. 局域网与私有地址最高优先级直连
+		"GEOSITE,private,DIRECT",
+		"GEOIP,private,DIRECT,no-resolve",
 		"DOMAIN-SUFFIX,local,DIRECT",
 		"IP-CIDR,127.0.0.0/8,DIRECT,no-resolve",
 		"IP-CIDR,192.168.0.0/16,DIRECT,no-resolve",
 		"IP-CIDR,10.0.0.0/8,DIRECT,no-resolve",
 		"IP-CIDR,172.16.0.0/12,DIRECT,no-resolve",
-		"DOMAIN,ipinfo.io,网络检测",
-		"DOMAIN,api.ipify.org,网络检测",
-		"DOMAIN,api64.ipify.org,网络检测",
-		"DOMAIN,ifconfig.me,网络检测",
-		"DOMAIN,icanhazip.com,网络检测",
-		"DOMAIN-SUFFIX,dnsleaktest.com,网络检测",
-		"DOMAIN-SUFFIX,ipleak.net,网络检测",
-		"DOMAIN-SUFFIX,browserleaks.com,网络检测",
-		"GEOSITE,category-ai-!cn,AI",
+	}
+	// 2. IP 与网络质量检测
+	for _, d := range netCheckExactDomains {
+		rules = append(rules, "DOMAIN,"+d+",网络检测")
+	}
+	for _, d := range netCheckSuffixDomains {
+		rules = append(rules, "DOMAIN-SUFFIX,"+d+",网络检测")
+	}
+	// 3. AI 服务（必须排在 Google / GitHub / Microsoft 之前，避免误入普通代理或直连）
+	for _, d := range aiProxyDomains {
+		rules = append(rules, "DOMAIN-SUFFIX,"+d+",AI")
+	}
+	rules = append(rules, "GEOSITE,category-ai-!cn,AI")
+	// 4. GitHub 与开发镜像/云平台
+	rules = append(rules, "GEOSITE,github,GitHub")
+	for _, d := range devProxyDomains {
+		rules = append(rules, "DOMAIN-SUFFIX,"+d+",GitHub")
+	}
+	// 5. 核心海外业务与流媒体
+	rules = append(rules,
 		"GEOSITE,youtube,YouTube",
 		"GEOSITE,google,Google",
-		"DOMAIN-SUFFIX,github.com,GitHub",
-		"DOMAIN-SUFFIX,githubusercontent.com,GitHub",
-		"DOMAIN-SUFFIX,githubassets.com,GitHub",
-		"GEOSITE,netflix,Netflix",
-		"GEOSITE,spotify,Spotify",
-		"GEOSITE,steam,Steam",
 		"GEOSITE,telegram,Telegram",
 		"GEOIP,telegram,Telegram,no-resolve",
 		"GEOSITE,tiktok,TikTok",
+		"GEOSITE,netflix,国际流媒体",
+		"GEOSITE,disney,国际流媒体",
+		"GEOSITE,spotify,国际流媒体",
+		"GEOSITE,hbo,国际流媒体",
+		"GEOSITE,primevideo,国际流媒体",
+		"GEOSITE,bahamut,国际流媒体",
+	)
+	// 6. Steam：智能模式下游戏下载 CDN 直连跑满宽带，商店/社区走代理
+	if smart {
+		rules = append(rules, "GEOSITE,steam@cn,DIRECT")
 	}
-
+	rules = append(rules, "GEOSITE,steam,Steam")
+	// 7. 社交/支付/搜索引擎绕行/出海云服务（排在 Microsoft 之前防止 Bing 被吞进直连）
+	rules = append(rules,
+		"GEOSITE,twitter,"+sel,
+		"GEOSITE,discord,"+sel,
+		"GEOSITE,reddit,"+sel,
+		"GEOSITE,paypal,"+sel,
+	)
 	for _, d := range searchBypassDomains {
 		rules = append(rules, "DOMAIN-SUFFIX,"+d+","+sel)
 	}
 	for _, d := range intlProxyDomains {
 		rules = append(rules, "DOMAIN-SUFFIX,"+d+","+sel)
 	}
-
-	rules = append(rules,
-		"GEOSITE,apple,Apple",
-		"GEOSITE,microsoft,Microsoft",
-		"GEOSITE,private,DIRECT",
-		"GEOIP,private,DIRECT,no-resolve",
-	)
+	// 8. Apple 与 Microsoft（智能模式下国内 CDN 自动直连）
+	if smart {
+		rules = append(rules, "GEOSITE,apple-cn,DIRECT")
+	}
+	rules = append(rules, "GEOSITE,apple,Apple")
+	if smart {
+		rules = append(rules, "GEOSITE,microsoft@cn,DIRECT")
+	}
+	rules = append(rules, "GEOSITE,microsoft,Microsoft")
+	// 9. 国内直连（smart 模式）
 	if smart {
 		rules = append(rules,
+			"GEOSITE,bilibili,DIRECT",
 			"GEOSITE,CN,DIRECT",
 			"GEOIP,CN,DIRECT,no-resolve",
 		)
@@ -541,8 +732,7 @@ func renderClash(nodes []subNode, u *store.User, site string, smart bool) string
 }
 
 // intlProxyDomains always go through the proxy in generated client rules.
-var intlProxyDomains = []string{"tencentcloud.com", "tencentcloud.co", "edgeone.ai", "alibabacloud.com",
-	"byteplus.com", "tiktok.com", "tiktokv.com", "tiktokcdn.com"}
+var intlProxyDomains = []string{"tencentcloud.com", "tencentcloud.co", "edgeone.ai", "alibabacloud.com", "byteplus.com"}
 
 // ---------------- sing-box ----------------
 
@@ -642,7 +832,7 @@ func singboxOutbound(sn subNode, u *store.User) map[string]any {
 	return o
 }
 
-func renderSingbox(nodes []subNode, u *store.User) string {
+func renderSingbox(nodes []subNode, u *store.User, smart bool) string {
 	var obs []any
 	var validNodes []subNode
 	for _, sn := range nodes {
@@ -651,40 +841,68 @@ func renderSingbox(nodes []subNode, u *store.User) string {
 			validNodes = append(validNodes, sn)
 		}
 	}
-	tw, jp, us, sg, other, tags := classifyNodes(validNodes)
+	cat := classifySubNodes(validNodes)
+	tags := cat.All
 	if len(tags) == 0 {
 		tags = []string{"direct"}
-		tw, jp, us, sg, other = tags, tags, tags, tags, tags
 	}
 
 	sel := "一键代理"
 	auto := "自动选择"
+	udpGrp := "⚡ 高速 UDP"
+	tcpGrp := "🛡️ 稳定 TCP"
 	directTag := "国内直连"
-	regGroups := []string{auto, "台湾", "日本", "美国", "新加坡", "其他地区", directTag}
-	topOutbounds := append(append([]string{}, regGroups...), tags...)
+	dual := cat.hasDualStack()
+
+	protoGroups := []string{}
+	if dual {
+		protoGroups = []string{udpGrp, tcpGrp}
+	}
+	allRegions := cat.regionNames()
+	aiRegions := cat.regionNames("US", "JP", "TW", "SG", "KR", "EU", "OTHER")
+	ttRegions := cat.regionNames("JP", "US", "TW", "SG", "KR", "EU", "OTHER")
+	tgRegions := cat.regionNames("SG", "JP", "TW", "US", "HK", "EU", "OTHER")
+	mediaRegions := cat.regionNames("TW", "JP", "US", "SG", "HK", "EU", "OTHER")
+
+	topOutbounds := dedupStrings([]string{auto}, protoGroups, allRegions, []string{directTag}, tags)
+	stdBusiness := dedupStrings([]string{sel}, protoGroups, allRegions, []string{directTag})
+	aiTail := []string{sel, directTag}
+	if dual {
+		aiTail = []string{tcpGrp, udpGrp, sel, directTag}
+	}
+	aiOpts := dedupStrings(aiRegions, aiTail)
+	ttOpts := dedupStrings(ttRegions, []string{sel}, protoGroups, []string{directTag})
+	ghOpts := stdBusiness
+	if dual {
+		ghOpts = dedupStrings([]string{sel, tcpGrp, udpGrp}, allRegions, []string{directTag})
+	}
 
 	outbounds := []any{
 		map[string]any{"type": "selector", "tag": sel, "outbounds": topOutbounds, "default": auto, "interrupt_exist_connections": true},
-		map[string]any{"type": "urltest", "tag": auto, "outbounds": tags, "url": "https://www.gstatic.com/generate_204", "interval": "5m", "tolerance": 50},
-		map[string]any{"type": "urltest", "tag": "台湾", "outbounds": tw, "url": "https://www.gstatic.com/generate_204", "interval": "5m", "tolerance": 50},
-		map[string]any{"type": "urltest", "tag": "日本", "outbounds": jp, "url": "https://www.gstatic.com/generate_204", "interval": "5m", "tolerance": 50},
-		map[string]any{"type": "urltest", "tag": "美国", "outbounds": us, "url": "https://www.gstatic.com/generate_204", "interval": "5m", "tolerance": 50},
-		map[string]any{"type": "urltest", "tag": "新加坡", "outbounds": sg, "url": "https://www.gstatic.com/generate_204", "interval": "5m", "tolerance": 50},
-		map[string]any{"type": "urltest", "tag": "其他地区", "outbounds": other, "url": "https://www.gstatic.com/generate_204", "interval": "5m", "tolerance": 50},
-
-		map[string]any{"type": "selector", "tag": "AI", "default": "美国", "outbounds": []string{"美国", "日本", "台湾", "新加坡", "其他地区", sel, directTag}, "interrupt_exist_connections": true},
-		map[string]any{"type": "selector", "tag": "YouTube", "default": sel, "outbounds": []string{sel, "台湾", "日本", "美国", "新加坡", "其他地区", directTag}, "interrupt_exist_connections": true},
-		map[string]any{"type": "selector", "tag": "Google", "default": sel, "outbounds": []string{sel, "台湾", "日本", "美国", "新加坡", "其他地区", directTag}, "interrupt_exist_connections": true},
-		map[string]any{"type": "selector", "tag": "GitHub", "default": sel, "outbounds": []string{sel, "台湾", "日本", "美国", "新加坡", "其他地区", directTag}, "interrupt_exist_connections": true},
-		map[string]any{"type": "selector", "tag": "Netflix", "default": sel, "outbounds": []string{sel, "台湾", "日本", "美国", "新加坡", "其他地区", directTag}, "interrupt_exist_connections": true},
-		map[string]any{"type": "selector", "tag": "Spotify", "default": sel, "outbounds": []string{sel, "台湾", "日本", "美国", "新加坡", "其他地区", directTag}, "interrupt_exist_connections": true},
-		map[string]any{"type": "selector", "tag": "Steam", "default": sel, "outbounds": []string{sel, "台湾", "日本", "美国", "新加坡", "其他地区", directTag}, "interrupt_exist_connections": true},
-		map[string]any{"type": "selector", "tag": "Telegram", "default": sel, "outbounds": []string{sel, "台湾", "日本", "美国", "新加坡", "其他地区", directTag}, "interrupt_exist_connections": true},
-		map[string]any{"type": "selector", "tag": "TikTok", "default": "日本", "outbounds": []string{"日本", "美国", "台湾", "新加坡", "其他地区", sel, directTag}, "interrupt_exist_connections": true},
-		map[string]any{"type": "selector", "tag": "Apple", "default": directTag, "outbounds": []string{directTag, sel, "台湾", "日本", "美国", "新加坡", "其他地区"}, "interrupt_exist_connections": true},
-		map[string]any{"type": "selector", "tag": "Microsoft", "default": directTag, "outbounds": []string{directTag, sel, "台湾", "日本", "美国", "新加坡", "其他地区"}, "interrupt_exist_connections": true},
-		map[string]any{"type": "selector", "tag": "网络检测", "default": sel, "outbounds": []string{sel, "台湾", "日本", "美国", "新加坡", "其他地区", directTag}, "interrupt_exist_connections": true},
+		map[string]any{"type": "urltest", "tag": auto, "outbounds": tags, "url": "https://www.gstatic.com/generate_204", "interval": "3m", "tolerance": 50},
 	}
+	if dual {
+		outbounds = append(outbounds,
+			map[string]any{"type": "urltest", "tag": udpGrp, "outbounds": cat.UDP, "url": "https://www.gstatic.com/generate_204", "interval": "3m", "tolerance": 50},
+			map[string]any{"type": "urltest", "tag": tcpGrp, "outbounds": cat.TCP, "url": "https://www.gstatic.com/generate_204", "interval": "3m", "tolerance": 50},
+		)
+	}
+	for _, r := range cat.Regions {
+		outbounds = append(outbounds, map[string]any{"type": "urltest", "tag": r.Name, "outbounds": r.Nodes, "url": "https://www.gstatic.com/generate_204", "interval": "3m", "tolerance": 50})
+	}
+	outbounds = append(outbounds,
+		map[string]any{"type": "selector", "tag": "AI", "default": aiOpts[0], "outbounds": aiOpts, "interrupt_exist_connections": true},
+		map[string]any{"type": "selector", "tag": "YouTube", "default": sel, "outbounds": stdBusiness, "interrupt_exist_connections": true},
+		map[string]any{"type": "selector", "tag": "Google", "default": sel, "outbounds": stdBusiness, "interrupt_exist_connections": true},
+		map[string]any{"type": "selector", "tag": "GitHub", "default": sel, "outbounds": ghOpts, "interrupt_exist_connections": true},
+		map[string]any{"type": "selector", "tag": "国际流媒体", "default": sel, "outbounds": dedupStrings([]string{sel}, mediaRegions, protoGroups, []string{directTag}), "interrupt_exist_connections": true},
+		map[string]any{"type": "selector", "tag": "Steam", "default": sel, "outbounds": stdBusiness, "interrupt_exist_connections": true},
+		map[string]any{"type": "selector", "tag": "Telegram", "default": sel, "outbounds": dedupStrings([]string{sel}, tgRegions, protoGroups, []string{directTag}), "interrupt_exist_connections": true},
+		map[string]any{"type": "selector", "tag": "TikTok", "default": ttOpts[0], "outbounds": ttOpts, "interrupt_exist_connections": true},
+		map[string]any{"type": "selector", "tag": "Apple", "default": directTag, "outbounds": dedupStrings([]string{directTag, sel}, allRegions), "interrupt_exist_connections": true},
+		map[string]any{"type": "selector", "tag": "Microsoft", "default": directTag, "outbounds": dedupStrings([]string{directTag, sel}, allRegions), "interrupt_exist_connections": true},
+		map[string]any{"type": "selector", "tag": "网络检测", "default": sel, "outbounds": stdBusiness, "interrupt_exist_connections": true},
+	)
 	outbounds = append(outbounds, obs...)
 	outbounds = append(outbounds, map[string]any{"type": "selector", "tag": directTag, "outbounds": []string{"direct"}})
 	outbounds = append(outbounds, map[string]any{"type": "direct", "tag": "direct"})
@@ -694,47 +912,91 @@ func renderSingbox(nodes []subNode, u *store.User) string {
 		map[string]any{"protocol": "dns", "action": "hijack-dns"},
 		map[string]any{"ip_is_private": true, "outbound": "direct"},
 		map[string]any{"domain_suffix": []string{"lan", "local", "localhost"}, "outbound": "direct"},
+		map[string]any{"rule_set": []string{"geosite-private", "geoip-private"}, "outbound": "direct"},
 		map[string]any{"clash_mode": "direct", "outbound": "direct"},
 		map[string]any{"clash_mode": "global", "outbound": sel},
-		map[string]any{
-			"domain": []string{"ipinfo.io", "api.ipify.org", "api64.ipify.org", "ifconfig.me", "icanhazip.com"},
-			"domain_suffix": []string{"dnsleaktest.com", "ipleak.net", "browserleaks.com"},
-			"outbound": "网络检测",
-		},
+		map[string]any{"domain": netCheckExactDomains, "domain_suffix": netCheckSuffixDomains, "outbound": "网络检测"},
+		map[string]any{"domain_suffix": aiProxyDomains, "outbound": "AI"},
 		map[string]any{"rule_set": []string{"geosite-category-ai-!cn"}, "outbound": "AI"},
+		map[string]any{"domain_suffix": devProxyDomains, "outbound": "GitHub"},
+		map[string]any{"rule_set": []string{"geosite-github"}, "outbound": "GitHub"},
 		map[string]any{"rule_set": []string{"geosite-youtube"}, "outbound": "YouTube"},
 		map[string]any{"rule_set": []string{"geosite-google"}, "outbound": "Google"},
-		map[string]any{"domain_suffix": []string{"github.com", "githubusercontent.com", "githubassets.com"}, "outbound": "GitHub"},
-		map[string]any{"rule_set": []string{"geosite-netflix"}, "outbound": "Netflix"},
-		map[string]any{"rule_set": []string{"geosite-spotify"}, "outbound": "Spotify"},
-		map[string]any{"rule_set": []string{"geosite-steam"}, "outbound": "Steam"},
 		map[string]any{"rule_set": []string{"geosite-telegram", "geoip-telegram"}, "outbound": "Telegram"},
 		map[string]any{"rule_set": []string{"geosite-tiktok"}, "outbound": "TikTok"},
-		// 关键搜索引擎绕行修复，防 Microsoft direct 吞掉
+		map[string]any{"rule_set": []string{"geosite-netflix", "geosite-disney", "geosite-spotify"}, "outbound": "国际流媒体"},
+	}
+	if smart {
+		rules = append(rules, map[string]any{"rule_set": []string{"geosite-steam@cn"}, "outbound": "direct"})
+	}
+	rules = append(rules,
+		map[string]any{"rule_set": []string{"geosite-steam"}, "outbound": "Steam"},
+		map[string]any{"rule_set": []string{"geosite-twitter", "geosite-discord", "geosite-reddit", "geosite-paypal"}, "outbound": sel},
 		map[string]any{"domain_suffix": searchBypassDomains, "outbound": sel},
 		map[string]any{"domain_suffix": intlProxyDomains, "outbound": sel},
-		map[string]any{"rule_set": []string{"geosite-apple"}, "outbound": "Apple"},
-		map[string]any{"rule_set": []string{"geosite-microsoft"}, "outbound": "Microsoft"},
-		map[string]any{"rule_set": []string{"geosite-private", "geoip-private"}, "outbound": "direct"},
-		map[string]any{"rule_set": []string{"geosite-cn", "geoip-cn"}, "outbound": directTag},
+	)
+	if smart {
+		rules = append(rules, map[string]any{"rule_set": []string{"geosite-apple-cn"}, "outbound": "direct"})
+	}
+	rules = append(rules, map[string]any{"rule_set": []string{"geosite-apple"}, "outbound": "Apple"})
+	if smart {
+		rules = append(rules, map[string]any{"rule_set": []string{"geosite-microsoft@cn"}, "outbound": "direct"})
+	}
+	rules = append(rules, map[string]any{"rule_set": []string{"geosite-microsoft"}, "outbound": "Microsoft"})
+	if smart {
+		rules = append(rules,
+			map[string]any{"rule_set": []string{"geosite-bilibili"}, "outbound": "direct"},
+			map[string]any{"rule_set": []string{"geosite-cn", "geoip-cn"}, "outbound": directTag},
+		)
 	}
 
+	rs := func(tag, path string) map[string]any {
+		return map[string]any{
+			"tag": tag, "type": "remote", "format": "binary",
+			"url":             "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/" + path,
+			"download_detour": sel, "update_interval": "1d",
+		}
+	}
 	ruleSets := []any{
-		map[string]any{"tag": "geosite-category-ai-!cn", "type": "remote", "format": "binary", "url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/category-ai-!cn.srs", "download_detour": sel, "update_interval": "1d"},
-		map[string]any{"tag": "geosite-youtube", "type": "remote", "format": "binary", "url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/youtube.srs", "download_detour": sel, "update_interval": "1d"},
-		map[string]any{"tag": "geosite-google", "type": "remote", "format": "binary", "url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/google.srs", "download_detour": sel, "update_interval": "1d"},
-		map[string]any{"tag": "geosite-netflix", "type": "remote", "format": "binary", "url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/netflix.srs", "download_detour": sel, "update_interval": "1d"},
-		map[string]any{"tag": "geosite-spotify", "type": "remote", "format": "binary", "url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/spotify.srs", "download_detour": sel, "update_interval": "1d"},
-		map[string]any{"tag": "geosite-steam", "type": "remote", "format": "binary", "url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/steam.srs", "download_detour": sel, "update_interval": "1d"},
-		map[string]any{"tag": "geosite-telegram", "type": "remote", "format": "binary", "url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/telegram.srs", "download_detour": sel, "update_interval": "1d"},
-		map[string]any{"tag": "geosite-tiktok", "type": "remote", "format": "binary", "url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/tiktok.srs", "download_detour": sel, "update_interval": "1d"},
-		map[string]any{"tag": "geosite-apple", "type": "remote", "format": "binary", "url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/apple.srs", "download_detour": sel, "update_interval": "1d"},
-		map[string]any{"tag": "geosite-microsoft", "type": "remote", "format": "binary", "url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/microsoft.srs", "download_detour": sel, "update_interval": "1d"},
-		map[string]any{"tag": "geosite-private", "type": "remote", "format": "binary", "url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/private.srs", "download_detour": sel, "update_interval": "1d"},
-		map[string]any{"tag": "geosite-cn", "type": "remote", "format": "binary", "url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/cn.srs", "download_detour": sel, "update_interval": "1d"},
-		map[string]any{"tag": "geoip-telegram", "type": "remote", "format": "binary", "url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geoip/telegram.srs", "download_detour": sel, "update_interval": "1d"},
-		map[string]any{"tag": "geoip-private", "type": "remote", "format": "binary", "url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geoip/private.srs", "download_detour": sel, "update_interval": "1d"},
-		map[string]any{"tag": "geoip-cn", "type": "remote", "format": "binary", "url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geoip/cn.srs", "download_detour": sel, "update_interval": "1d"},
+		rs("geosite-category-ai-!cn", "geosite/category-ai-!cn.srs"),
+		rs("geosite-github", "geosite/github.srs"),
+		rs("geosite-youtube", "geosite/youtube.srs"),
+		rs("geosite-google", "geosite/google.srs"),
+		rs("geosite-netflix", "geosite/netflix.srs"),
+		rs("geosite-disney", "geosite/disney.srs"),
+		rs("geosite-spotify", "geosite/spotify.srs"),
+		rs("geosite-steam", "geosite/steam.srs"),
+		rs("geosite-telegram", "geosite/telegram.srs"),
+		rs("geosite-tiktok", "geosite/tiktok.srs"),
+		rs("geosite-twitter", "geosite/twitter.srs"),
+		rs("geosite-discord", "geosite/discord.srs"),
+		rs("geosite-reddit", "geosite/reddit.srs"),
+		rs("geosite-paypal", "geosite/paypal.srs"),
+		rs("geosite-apple", "geosite/apple.srs"),
+		rs("geosite-microsoft", "geosite/microsoft.srs"),
+		rs("geosite-private", "geosite/private.srs"),
+		rs("geoip-telegram", "geoip/telegram.srs"),
+		rs("geoip-private", "geoip/private.srs"),
+	}
+	if smart {
+		ruleSets = append(ruleSets,
+			rs("geosite-steam@cn", "geosite/steam@cn.srs"),
+			rs("geosite-apple-cn", "geosite/apple-cn.srs"),
+			rs("geosite-microsoft@cn", "geosite/microsoft@cn.srs"),
+			rs("geosite-bilibili", "geosite/bilibili.srs"),
+			rs("geosite-cn", "geosite/cn.srs"),
+			rs("geoip-cn", "geoip/cn.srs"),
+		)
+	}
+
+	dnsRules := []any{
+		map[string]any{"clash_mode": "direct", "server": "local"},
+		map[string]any{"clash_mode": "global", "server": "remote"},
+	}
+	if smart {
+		dnsRules = append(dnsRules, map[string]any{"rule_set": []string{"geosite-cn", "geosite-private"}, "server": "local"})
+	} else {
+		dnsRules = append(dnsRules, map[string]any{"rule_set": []string{"geosite-private"}, "server": "local"})
 	}
 
 	cfg := map[string]any{
@@ -744,11 +1006,7 @@ func renderSingbox(nodes []subNode, u *store.User) string {
 				map[string]any{"type": "https", "tag": "remote", "server": "1.1.1.1", "detour": sel},
 				map[string]any{"type": "https", "tag": "local", "server": "223.5.5.5"},
 			},
-			"rules": []any{
-				map[string]any{"clash_mode": "direct", "server": "local"},
-				map[string]any{"clash_mode": "global", "server": "remote"},
-				map[string]any{"rule_set": []string{"geosite-cn", "geosite-private"}, "server": "local"},
-			},
+			"rules":    dnsRules,
 			"final":    "remote",
 			"strategy": "prefer_ipv4",
 		},
@@ -907,7 +1165,7 @@ func (s *Server) handleSub(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, renderClash(nodes, u, site, s.smartRules(r)))
 	case "singbox", "sing-box", "sfa":
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		fmt.Fprint(w, renderSingbox(nodes, u))
+		fmt.Fprint(w, renderSingbox(nodes, u, s.smartRules(r)))
 	case "surge":
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		fmt.Fprint(w, renderSurge(nodes, u, s.subURL(r)+r.URL.RequestURI(), s.smartRules(r)))

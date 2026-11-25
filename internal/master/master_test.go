@@ -441,8 +441,77 @@ func TestClashRuleModes(t *testing.T) {
 		t.Fatalf("global mode must not send China sites direct:\n%s", g)
 	}
 	sm := renderClash(nil, &store.User{}, "x", true)
-	if !strings.Contains(sm, "GEOSITE,CN,DIRECT") || !strings.Contains(sm, "GEOIP,CN,DIRECT,no-resolve") {
-		t.Fatalf("smart mode rules missing:\n%s", sm)
+	for _, want := range []string{
+		"GEOSITE,CN,DIRECT",
+		"GEOIP,CN,DIRECT,no-resolve",
+		"GEOSITE,steam@cn,DIRECT",
+		"GEOSITE,apple-cn,DIRECT",
+		"GEOSITE,microsoft@cn,DIRECT",
+		"GEOSITE,github,GitHub",
+		"DOMAIN-SUFFIX,antigravity.google,AI",
+		"DOMAIN-SUFFIX,claude.ai,AI",
+		"DOMAIN-SUFFIX,copilot.microsoft.com,AI",
+	} {
+		if !strings.Contains(sm, want) {
+			t.Fatalf("smart mode missing rule %q:\n%s", want, sm)
+		}
+	}
+	if strings.Index(sm, "DOMAIN-SUFFIX,antigravity.google,AI") >= strings.Index(sm, "GEOSITE,google,Google") {
+		t.Fatalf("AI rules must precede GEOSITE,google")
+	}
+	if strings.Index(sm, "DOMAIN-SUFFIX,copilot.microsoft.com,AI") >= strings.Index(sm, "GEOSITE,microsoft,Microsoft") {
+		t.Fatalf("AI Copilot rule must precede GEOSITE,microsoft")
+	}
+}
+
+func TestOptimizedRoutingGroups(t *testing.T) {
+	mk := func(name, proto, cc string) subNode {
+		n := &store.Node{Name: name, Protocol: proto, Port: 44443}
+		n.Settings.SNI = "a.example.com"
+		if proto == "vless" {
+			n.Settings.Security = "reality"
+			n.Settings.RealityPublicKey = "pub"
+			n.Settings.RealityShortID = "1234"
+		}
+		return subNode{Node: n, Name: name, Addr: "1.2.3.4", Country: cc}
+	}
+	nodes := []subNode{
+		mk("🇯🇵 阿里云日本", "hysteria2", "JP"),
+		mk("🇯🇵 阿里云日本-TCP", "vless", "JP"),
+		mk("🇺🇸 chicagovps", "hysteria2", "US"),
+		mk("🇺🇸 chicagovps-TCP", "vless", "US"),
+		mk("🇸🇪 AWS-瑞典EC2", "hysteria2", "SE"),
+		mk("🇸🇪 AWS-瑞典EC2-TCP", "vless", "SE"),
+	}
+	// Verify region detection trusts Country code over vendor name (阿里云新加坡 -> SG, not JP)
+	if got := detectRegionKey(mk("🇸🇬 阿里云新加坡", "hysteria2", "SG")); got != "SG" {
+		t.Fatalf("expected SG for 阿里云新加坡, got %q", got)
+	}
+	clash := renderClash(nodes, &store.User{UUID: "u1", Password: "p1"}, "NodeHub", true)
+	for _, want := range []string{
+		`"name":"⚡ 高速 UDP"`,
+		`"name":"🛡️ 稳定 TCP"`,
+		`"name":"故障转移","proxies":["⚡ 高速 UDP","🛡️ 稳定 TCP"]`,
+		`"name":"日本"`,
+		`"name":"美国"`,
+		`"name":"欧洲"`,
+	} {
+		if !strings.Contains(clash, want) {
+			t.Fatalf("clash config missing %q:\n%s", want, clash)
+		}
+	}
+	for _, forbid := range []string{`"name":"新加坡"`, `"name":"香港"`, `"name":"台湾"`, `"name":"其他地区"`} {
+		if strings.Contains(clash, forbid) {
+			t.Fatalf("clash config must omit empty region group %s", forbid)
+		}
+	}
+	sbSmart := renderSingbox(nodes, &store.User{UUID: "u1", Password: "p1"}, true)
+	if !strings.Contains(sbSmart, "geosite-cn") || strings.Contains(sbSmart, `"tag": "新加坡"`) {
+		t.Fatalf("sing-box smart config unexpected:\n%s", sbSmart)
+	}
+	sbGlobal := renderSingbox(nodes, &store.User{UUID: "u1", Password: "p1"}, false)
+	if strings.Contains(sbGlobal, "geosite-cn") {
+		t.Fatalf("sing-box global config must not include geosite-cn")
 	}
 }
 
