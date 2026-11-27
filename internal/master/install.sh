@@ -69,10 +69,15 @@ BIN=/usr/local/nodehub
 mkdir -p "$BIN" /etc/nodehub
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 
+header_val() {
+  local name="$1" file="$2"
+  tr -d '\r' < "$file" 2>/dev/null | awk -v k="${name}:" 'tolower($1)==k{print $2; exit}' || true
+}
+
 verify_sha() {
   local file="$1" hdr="$2" label="$3"
   local want got
-  want="$(awk 'BEGIN{IGNORECASE=1}/^X-Checksum-Sha256:/{gsub(/\r/,""); print $2; exit}' "$hdr" 2>/dev/null || true)"
+  want="$(header_val "x-checksum-sha256" "$hdr")"
   if [ -n "$want" ] && need sha256sum; then
     got="$(sha256sum "$file" | awk '{print $1}')"
     if [ "$got" != "$want" ]; then
@@ -107,7 +112,8 @@ extract_zip_member() {
 install_agent() {
   if [ "$FORCE" = 0 ] && [ -x "$BIN/nodehub-agent" ] && need sha256sum; then
     local want cur
-    want="$($CURL_HEAD "$MASTER/dl/agent?arch=$ARCH" 2>/dev/null | awk 'BEGIN{IGNORECASE=1}/^X-Checksum-Sha256:/{gsub(/\r/,""); print $2; exit}' || true)"
+    $CURL_HEAD "$MASTER/dl/agent?arch=$ARCH" >"$TMP/agent.head" 2>/dev/null || true
+    want="$(header_val "x-checksum-sha256" "$TMP/agent.head")"
     cur="$(sha256sum "$BIN/nodehub-agent" | awk '{print $1}')"
     if [ -n "$want" ] && [ "$want" = "$cur" ]; then
       echo "==> nodehub-agent ($ARCH) 已是最新版本，跳过下载"
@@ -122,9 +128,13 @@ install_agent() {
 
 install_xray() {
   [ "$WITH_XRAY" = 1 ] || return 0
-  if [ "$FORCE" = 0 ] && [ -x "$BIN/xray" ] && "$BIN/xray" version 2>/dev/null | head -n 1 | grep -qF "${XRAY_VERSION#v}"; then
-    echo "==> Xray $XRAY_VERSION 已安装，跳过下载"
-    return 0
+  if [ "$FORCE" = 0 ] && [ -x "$BIN/xray" ]; then
+    local xver
+    xver="$("$BIN/xray" version 2>/dev/null || true)"
+    if printf '%s' "$xver" | grep -qF "${XRAY_VERSION#v}"; then
+      echo "==> Xray $XRAY_VERSION 已安装，跳过下载"
+      return 0
+    fi
   fi
   echo "==> installing Xray $XRAY_VERSION"
   # Prefer pre-compressed standalone binary from master (no unzip & no 15MB unused geoip/geosite)
@@ -140,9 +150,13 @@ install_xray() {
 
 install_singbox() {
   [ "$WITH_SINGBOX" = 1 ] || return 0
-  if [ "$FORCE" = 0 ] && [ -x "$BIN/sing-box" ] && "$BIN/sing-box" version 2>/dev/null | head -n 1 | grep -qF "$SINGBOX_VERSION"; then
-    echo "==> sing-box $SINGBOX_VERSION 已安装，跳过下载"
-    return 0
+  if [ "$FORCE" = 0 ] && [ -x "$BIN/sing-box" ]; then
+    local sver
+    sver="$("$BIN/sing-box" version 2>/dev/null || true)"
+    if printf '%s' "$sver" | grep -qF "$SINGBOX_VERSION"; then
+      echo "==> sing-box $SINGBOX_VERSION 已安装，跳过下载"
+      return 0
+    fi
   fi
   echo "==> installing sing-box $SINGBOX_VERSION"
   # Prefer the build served by master (compiled with v2ray_api for per-user traffic stats & gzip pre-compressed)

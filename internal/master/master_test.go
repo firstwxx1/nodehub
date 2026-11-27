@@ -791,7 +791,7 @@ func TestDownloadGzipAndChecksumCache(t *testing.T) {
 			t.Fatalf("install.sh missing %q", want)
 		}
 	}
-	if strings.Contains(string(instBody), "\r") {
-		t.Fatalf("install.sh must use LF line endings")
+	if strings.Contains(string(instBody), "\r") || strings.Contains(string(instBody), "IGNORECASE") || strings.Contains(string(instBody), "version 2>/dev/null | head") {
+		t.Fatalf("install.sh must use LF endings, mawk-safe tolower(), and avoid pipefail SIGPIPE")
 	}
 }
