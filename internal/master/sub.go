@@ -252,6 +252,9 @@ func shareLink(sn subNode, u *store.User) string {
 		return "tuic://" + sn.uuid(u) + ":" + url.PathEscape(sn.pw(u)) + "@" + hostPort(sn.Addr, n.Port) + "?" + q.Encode() + frag
 	case "anytls":
 		q.Set("sni", st.SNI)
+		if st.ALPN != "" {
+			q.Set("alpn", st.ALPN)
+		}
 		if insecure(n) {
 			q.Set("insecure", "1")
 		}
@@ -265,6 +268,19 @@ func orStr(v, d string) string {
 		return d
 	}
 	return v
+}
+
+func splitTrimCSV(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // ---------------- clash / mihomo ----------------
@@ -310,6 +326,9 @@ func clashProxy(sn subNode, u *store.User) map[string]any {
 			p["tls"] = true
 			if st.SNI != "" {
 				p[sniKey] = st.SNI
+			}
+			if alpn := splitTrimCSV(st.ALPN); len(alpn) > 0 {
+				p["alpn"] = alpn
 			}
 			p["skip-cert-verify"] = insecure(n)
 			p["client-fingerprint"] = orStr(st.Fingerprint, "chrome")
@@ -385,6 +404,10 @@ func clashProxy(sn subNode, u *store.User) map[string]any {
 		p["password"] = sn.pw(u)
 		p["sni"] = st.SNI
 		p["skip-cert-verify"] = insecure(n)
+		p["client-fingerprint"] = orStr(st.Fingerprint, "chrome")
+		if alpn := splitTrimCSV(st.ALPN); len(alpn) > 0 {
+			p["alpn"] = alpn
+		}
 	default:
 		return nil
 	}
@@ -481,6 +504,9 @@ func buildAutoRelays(directNodes []subNode, relayGroup string) (asiaRelays []str
 	best := map[string]candidate{}
 	for _, sn := range directNodes {
 		if sn.IsRelay || sn.DialerProxy != "" || sn.Node == nil || !isRelayTargetRegion(detectRegionKey(sn)) {
+			continue
+		}
+		if strings.TrimSpace(sn.Node.Settings.Outbound) != "" || sn.Node.Settings.Network == "ws" {
 			continue
 		}
 		if sn.Node.ServerID > 0 && coveredServers[sn.Node.ServerID] {
@@ -635,6 +661,8 @@ type nodeCatalog struct {
 	Regions []regionBucket
 	UDP     []string
 	TCP     []string
+	WARP    []string
+	CDN     []string
 	All     []string
 }
 
@@ -744,6 +772,12 @@ func classifySubNodes(nodes []subNode) nodeCatalog {
 			default:
 				cat.TCP = append(cat.TCP, sn.Name)
 			}
+			if strings.EqualFold(strings.TrimSpace(sn.Node.Settings.Outbound), "warp") {
+				cat.WARP = append(cat.WARP, sn.Name)
+			}
+			if sn.Node.Settings.Network == "ws" && sn.Node.Settings.Security == "tls" {
+				cat.CDN = append(cat.CDN, sn.Name)
+			}
 		}
 	}
 	for _, spec := range order {
@@ -811,14 +845,25 @@ func renderClash(nodes []subNode, u *store.User, site string, smart, relay bool)
 	fb := "故障转移"
 	udpGrp := "⚡ 高速 UDP"
 	tcpGrp := "🛡️ 稳定 TCP"
+	warpGrp := "🛡️ WARP 出口"
+	cdnGrp := "☁️ CF CDN"
 	direct := "国内直连"
 	dual := cat.hasDualStack()
+	hasWARP := len(cat.WARP) > 0
+	hasCDN := len(cat.CDN) > 0
 	hasRelay := len(relayNames) > 0
 	hasClientRelay := clientRelayed > 0 && len(asiaRelays) > 0
 
 	protoGroups := []string{}
 	if dual {
 		protoGroups = []string{udpGrp, tcpGrp}
+	}
+	specialGroups := []string{}
+	if hasWARP {
+		specialGroups = append(specialGroups, warpGrp)
+	}
+	if hasCDN {
+		specialGroups = append(specialGroups, cdnGrp)
 	}
 	relayGroups := []string{}
 	if hasRelay {
@@ -832,18 +877,27 @@ func renderClash(nodes []subNode, u *store.User, site string, smart, relay bool)
 
 	sb.WriteString("proxy-groups:\n")
 	// 1. 核心调度组
-	topList := dedupStrings([]string{auto, fb}, protoGroups, relayGroups, allRegions, []string{direct}, names)
+	topList := dedupStrings([]string{auto, fb}, protoGroups, specialGroups, relayGroups, allRegions, []string{direct}, names)
 	sb.WriteString("  - " + yamlStr(map[string]any{"name": sel, "type": "select", "proxies": topList}) + "\n")
 	sb.WriteString("  - " + yamlStr(map[string]any{"name": auto, "type": "url-test", "url": "https://www.gstatic.com/generate_204", "interval": 180, "tolerance": 50, "lazy": true, "proxies": names}) + "\n")
 	fbProxies := names
 	if dual {
-		// 正常优先高速 UDP（Hy2），运营商限速/阻断 UDP 时自动无缝切至稳定 TCP（Reality）
+		// 正常优先高速 UDP（Hy2），运营商限速/阻断 UDP 时自动无缝切至稳定 TCP（Reality），再兜底 CF CDN
 		fbProxies = []string{udpGrp, tcpGrp}
+		if hasCDN {
+			fbProxies = append(fbProxies, cdnGrp)
+		}
 	}
 	sb.WriteString("  - " + yamlStr(map[string]any{"name": fb, "type": "fallback", "url": "https://www.gstatic.com/generate_204", "interval": 120, "lazy": true, "proxies": fbProxies}) + "\n")
 	if dual {
 		sb.WriteString("  - " + yamlStr(map[string]any{"name": udpGrp, "type": "url-test", "url": "https://www.gstatic.com/generate_204", "interval": 180, "tolerance": 50, "lazy": true, "proxies": cat.UDP}) + "\n")
 		sb.WriteString("  - " + yamlStr(map[string]any{"name": tcpGrp, "type": "url-test", "url": "https://www.gstatic.com/generate_204", "interval": 180, "tolerance": 50, "lazy": true, "proxies": cat.TCP}) + "\n")
+	}
+	if hasWARP {
+		sb.WriteString("  - " + yamlStr(map[string]any{"name": warpGrp, "type": "url-test", "url": "https://www.gstatic.com/generate_204", "interval": 180, "tolerance": 50, "lazy": true, "proxies": cat.WARP}) + "\n")
+	}
+	if hasCDN {
+		sb.WriteString("  - " + yamlStr(map[string]any{"name": cdnGrp, "type": "url-test", "url": "https://www.gstatic.com/generate_204", "interval": 180, "tolerance": 50, "lazy": true, "proxies": cat.CDN}) + "\n")
 	}
 	if hasRelay {
 		// 欧美中转组通过亚洲入口中转绕过跨太平洋晚高峰丢包，同时保留欧美原生出口 IP
@@ -854,12 +908,12 @@ func renderClash(nodes []subNode, u *store.User, site string, smart, relay bool)
 	}
 
 	// 2. 精准业务分流组
-	stdBusiness := dedupStrings([]string{sel}, protoGroups, relayGroups, allRegions, []string{direct})
+	stdBusiness := dedupStrings([]string{sel}, protoGroups, specialGroups, relayGroups, allRegions, []string{direct})
 	aiTail := []string{sel, direct}
 	if dual {
 		aiTail = []string{tcpGrp, udpGrp, sel, direct}
 	}
-	sb.WriteString("  - " + yamlStr(map[string]any{"name": "AI", "type": "select", "proxies": dedupStrings(aiRegions, relayGroups, aiTail)}) + "\n")
+	sb.WriteString("  - " + yamlStr(map[string]any{"name": "AI", "type": "select", "proxies": dedupStrings(aiRegions, specialGroups, relayGroups, aiTail)}) + "\n")
 	sb.WriteString("  - " + yamlStr(map[string]any{"name": "YouTube", "type": "select", "proxies": stdBusiness}) + "\n")
 	sb.WriteString("  - " + yamlStr(map[string]any{"name": "Google", "type": "select", "proxies": stdBusiness}) + "\n")
 	ghOpts := stdBusiness
@@ -979,7 +1033,7 @@ func singboxOutbound(sn subNode, u *store.User) map[string]any {
 		if st.SNI != "" {
 			t["server_name"] = st.SNI
 		}
-		if a := strings.Split(st.ALPN, ","); st.ALPN != "" {
+		if a := splitTrimCSV(st.ALPN); len(a) > 0 {
 			t["alpn"] = a
 		} else if defALPN != nil {
 			t["alpn"] = defALPN
@@ -1060,7 +1114,9 @@ func singboxOutbound(sn subNode, u *store.User) map[string]any {
 		o["tls"] = tls([]string{"h3"})
 	case "anytls":
 		o["type"], o["password"] = "anytls", sn.pw(u)
-		o["tls"] = tls(nil)
+		t := tls(nil)
+		t["utls"] = map[string]any{"enabled": true, "fingerprint": orStr(st.Fingerprint, "chrome")}
+		o["tls"] = t
 	default:
 		return nil
 	}
@@ -1107,14 +1163,25 @@ func renderSingbox(nodes []subNode, u *store.User, smart, relay bool) string {
 	auto := "自动选择"
 	udpGrp := "⚡ 高速 UDP"
 	tcpGrp := "🛡️ 稳定 TCP"
+	warpGrp := "🛡️ WARP 出口"
+	cdnGrp := "☁️ CF CDN"
 	directTag := "国内直连"
 	dual := cat.hasDualStack()
+	hasWARP := len(cat.WARP) > 0
+	hasCDN := len(cat.CDN) > 0
 	hasRelay := len(relayNames) > 0
 	hasClientRelay := clientRelayed > 0 && len(asiaRelays) > 0
 
 	protoGroups := []string{}
 	if dual {
 		protoGroups = []string{udpGrp, tcpGrp}
+	}
+	specialGroups := []string{}
+	if hasWARP {
+		specialGroups = append(specialGroups, warpGrp)
+	}
+	if hasCDN {
+		specialGroups = append(specialGroups, cdnGrp)
 	}
 	relayGroups := []string{}
 	if hasRelay {
@@ -1126,17 +1193,17 @@ func renderSingbox(nodes []subNode, u *store.User, smart, relay bool) string {
 	tgRegions := cat.regionNames("SG", "JP", "TW", "US", "HK", "EU", "OTHER")
 	mediaRegions := cat.regionNames("TW", "JP", "US", "SG", "HK", "EU", "OTHER")
 
-	topOutbounds := dedupStrings([]string{auto}, protoGroups, relayGroups, allRegions, []string{directTag}, tags)
-	stdBusiness := dedupStrings([]string{sel}, protoGroups, relayGroups, allRegions, []string{directTag})
+	topOutbounds := dedupStrings([]string{auto}, protoGroups, specialGroups, relayGroups, allRegions, []string{directTag}, tags)
+	stdBusiness := dedupStrings([]string{sel}, protoGroups, specialGroups, relayGroups, allRegions, []string{directTag})
 	aiTail := []string{sel, directTag}
 	if dual {
 		aiTail = []string{tcpGrp, udpGrp, sel, directTag}
 	}
-	aiOpts := dedupStrings(aiRegions, relayGroups, aiTail)
+	aiOpts := dedupStrings(aiRegions, specialGroups, relayGroups, aiTail)
 	ttOpts := dedupStrings(ttRegions, relayGroups, []string{sel}, protoGroups, []string{directTag})
 	ghOpts := stdBusiness
 	if dual {
-		ghOpts = dedupStrings([]string{sel, tcpGrp, udpGrp}, relayGroups, allRegions, []string{directTag})
+		ghOpts = dedupStrings([]string{sel, tcpGrp, udpGrp}, specialGroups, relayGroups, allRegions, []string{directTag})
 	}
 
 	outbounds := []any{
@@ -1147,6 +1214,16 @@ func renderSingbox(nodes []subNode, u *store.User, smart, relay bool) string {
 		outbounds = append(outbounds,
 			map[string]any{"type": "urltest", "tag": udpGrp, "outbounds": cat.UDP, "url": "https://www.gstatic.com/generate_204", "interval": "3m", "tolerance": 50},
 			map[string]any{"type": "urltest", "tag": tcpGrp, "outbounds": cat.TCP, "url": "https://www.gstatic.com/generate_204", "interval": "3m", "tolerance": 50},
+		)
+	}
+	if hasWARP {
+		outbounds = append(outbounds,
+			map[string]any{"type": "urltest", "tag": warpGrp, "outbounds": cat.WARP, "url": "https://www.gstatic.com/generate_204", "interval": "3m", "tolerance": 50},
+		)
+	}
+	if hasCDN {
+		outbounds = append(outbounds,
+			map[string]any{"type": "urltest", "tag": cdnGrp, "outbounds": cat.CDN, "url": "https://www.gstatic.com/generate_204", "interval": "3m", "tolerance": 50},
 		)
 	}
 	if hasRelay {

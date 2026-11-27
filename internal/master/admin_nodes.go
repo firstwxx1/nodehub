@@ -212,6 +212,13 @@ func (s *Server) normalizeNode(n *store.Node) error {
 	if st.CertMode == "file" && (st.CertFile == "" || st.KeyFile == "") {
 		return fmt.Errorf("证书模式为文件时需要填写证书和私钥路径")
 	}
+	st.Outbound = strings.ToLower(strings.TrimSpace(st.Outbound))
+	if st.Outbound != "" && st.Outbound != "warp" {
+		return fmt.Errorf("不支持的出站路由 %q（仅支持留空直连或 warp）", st.Outbound)
+	}
+	if st.Outbound == "warp" && n.Core != "singbox" {
+		return fmt.Errorf("WARP 出站目前只支持 sing-box 内核的节点")
+	}
 	return nil
 }
 

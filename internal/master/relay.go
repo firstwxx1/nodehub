@@ -115,6 +115,9 @@ func isRelayCapableVLESS(n *store.Node) bool {
 	if !n.Enabled || n.Source != "local" || n.Core == "script" || n.Protocol != "vless" {
 		return false
 	}
+	if strings.TrimSpace(n.Settings.Outbound) != "" {
+		return false
+	}
 	netw := strings.ToLower(strings.TrimSpace(n.Settings.Network))
 	if netw != "" && netw != "tcp" && netw != "raw" {
 		return false
@@ -123,7 +126,7 @@ func isRelayCapableVLESS(n *store.Node) bool {
 }
 
 func isRelayCapableHy2(n *store.Node) bool {
-	return n.Enabled && n.Source == "local" && n.Core == "singbox" && n.Protocol == "hysteria2"
+	return n.Enabled && n.Source == "local" && n.Core == "singbox" && n.Protocol == "hysteria2" && strings.TrimSpace(n.Settings.Outbound) == ""
 }
 
 func relayTargetSNI(n *store.Node) string {

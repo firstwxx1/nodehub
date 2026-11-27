@@ -2,7 +2,7 @@
 package proto
 
 // AgentVersion is bumped whenever the agent changes in a way the master cares about.
-const AgentVersion = "1.3.6"
+const AgentVersion = "1.3.7"
 
 // Heartbeat is sent by the agent every few seconds.
 type Heartbeat struct {
@@ -128,6 +128,8 @@ type NodeSettings struct {
 	Masquerade string `json:"masquerade,omitempty"`
 	// Optional client-side front-end relay proxy or group name (Clash dialer-proxy / sing-box detour / Surge underlying-proxy).
 	DialerProxy string `json:"dialer_proxy,omitempty"`
+	// Optional server-side outbound override for sing-box nodes: "" (direct) or "warp" (Cloudflare WARP).
+	Outbound string `json:"outbound,omitempty"`
 }
 
 // NodeUser is a user allowed on a node. Key is the stats identity (unique per node).

@@ -734,15 +734,15 @@ func TestDualStackProvisionWithCloudflare(t *testing.T) {
 	if !strings.Contains(string(scriptBody), ts.URL) || strings.Contains(string(scriptBody), "__MASTER_URL__") {
 		t.Fatalf("dual-stack.sh did not substitute master URL")
 	}
-	if strings.Contains(string(scriptBody), "$GROUPS") || strings.Contains(string(scriptBody), "\r") || !strings.Contains(string(scriptBody), "NODE_GROUPS") {
-		t.Fatalf("dual-stack.sh must avoid bash built-in $GROUPS and CRLF")
+	if strings.Contains(string(scriptBody), "$GROUPS") || strings.Contains(string(scriptBody), "\r") || !strings.Contains(string(scriptBody), "NODE_GROUPS") || !strings.Contains(string(scriptBody), "--reinstall") || !strings.Contains(string(scriptBody), "--cdn-port") || !strings.Contains(string(scriptBody), "--warp-port") {
+		t.Fatalf("dual-stack.sh must avoid bash built-in $GROUPS/CRLF and expose 4-line flags")
 	}
 
 	raw := "nhk_" + util.RandToken(30)
 	_, _ = s.st.CreateAPIKey("prov", raw[:10], util.SHA256Hex(raw), "read,write", "")
 	auth := "Bearer " + raw
 
-	// First call: creates server + CF DNS A record (bare prefix -> jp2.example.com) + Hy2(acme_dns) + VLESS-Reality(tcp)
+	// First call: creates server + CF DNS A (dns-only) + CF CDN A (proxied=true) + 4-line stack (Reality 443, Hy2 44443, CDN 2053, AnyTLS-WARP 8446)
 	code, out := c.do("POST", "/api/open/v1/provision", auth, map[string]any{
 		"name": "jp2", "region": "JP", "ip": "203.0.113.55", "domain": "jp2",
 	})
@@ -752,24 +752,114 @@ func TestDualStackProvisionWithCloudflare(t *testing.T) {
 	if out["domain"] != "jp2.example.com" || out["dns_action"] != "created" || out["cert_mode"] != "acme_dns" {
 		t.Fatalf("unexpected domain/dns/cert: %v", out)
 	}
+	if out["cdn_domain"] != "cdn-jp2.example.com" || out["cdn_dns_action"] != "created" {
+		t.Fatalf("unexpected cdn domain/dns: %v", out)
+	}
 	if rec := records["jp2.example.com"]; rec.Content != "203.0.113.55" || rec.Proxied {
-		t.Fatalf("CF record mismatch: %+v", rec)
+		t.Fatalf("CF direct record mismatch: %+v", rec)
+	}
+	if rec := records["cdn-jp2.example.com"]; rec.Content != "203.0.113.55" || !rec.Proxied || rec.TTL != 1 {
+		t.Fatalf("CF CDN proxied record mismatch: %+v", rec)
 	}
 	if out["token"] == "" || out["install_command"] == "" {
 		t.Fatalf("missing agent token/install_command: %v", out)
 	}
 	hy2 := out["hy2_node"].(map[string]any)
 	vl := out["vless_node"].(map[string]any)
-	if hy2["protocol"] != "hysteria2" || hy2["core"] != "singbox" || vl["protocol"] != "vless" || vl["core"] != "xray" {
-		t.Fatalf("unexpected nodes: hy2=%v vl=%v", hy2, vl)
+	cdn := out["cdn_node"].(map[string]any)
+	warp := out["warp_node"].(map[string]any)
+	if hy2["protocol"] != "hysteria2" || hy2["core"] != "singbox" || int(hy2["port"].(float64)) != 44443 {
+		t.Fatalf("unexpected hy2 node: %v", hy2)
+	}
+	if vl["protocol"] != "vless" || vl["core"] != "xray" || int(vl["port"].(float64)) != 443 {
+		t.Fatalf("unexpected vless reality node (want port 443): %v", vl)
+	}
+	if cdn["protocol"] != "vless" || cdn["core"] != "singbox" || int(cdn["port"].(float64)) != 2053 || cdn["address"] != "cdn-jp2.example.com" {
+		t.Fatalf("unexpected cdn node: %v", cdn)
+	}
+	cdnSt := cdn["settings"].(map[string]any)
+	if cdnSt["network"] != "ws" || cdnSt["security"] != "tls" || cdnSt["cert_mode"] != "acme_dns" || cdnSt["alpn"] != "http/1.1" {
+		t.Fatalf("unexpected cdn settings: %v", cdnSt)
+	}
+	if warp["protocol"] != "anytls" || warp["core"] != "singbox" || int(warp["port"].(float64)) != 8446 {
+		t.Fatalf("unexpected warp node: %v", warp)
+	}
+	warpSt := warp["settings"].(map[string]any)
+	if warpSt["outbound"] != "warp" || warpSt["sni"] != "www.apple.com" {
+		t.Fatalf("unexpected warp settings: %v", warpSt)
 	}
 
-	// Second call for same IP: idempotent, does not duplicate nodes, CF record unchanged
+	// Second call for same IP: idempotent, does not duplicate nodes, CF records unchanged, no new token
 	code2, out2 := c.do("POST", "/api/open/v1/provision", auth, map[string]any{
 		"name": "jp2", "region": "JP", "ip": "203.0.113.55", "domain": "jp2.example.com",
 	})
-	if code2 != 200 || out2["created_server"] != false || out2["dns_action"] != "unchanged" {
+	if code2 != 200 || out2["created_server"] != false || out2["dns_action"] != "unchanged" || out2["cdn_dns_action"] != "unchanged" || out2["token"] != "" {
 		t.Fatalf("second provision mismatch %d: %v", code2, out2)
+	}
+
+	// Third call with reset_token=true: rotates token & returns fresh install_command without duplicating nodes
+	code3, out3 := c.do("POST", "/api/open/v1/provision", auth, map[string]any{
+		"name": "jp2", "region": "JP", "ip": "203.0.113.55", "reset_token": true,
+	})
+	if code3 != 200 || out3["token"] == "" || out3["install_command"] == "" {
+		t.Fatalf("reset_token provision mismatch %d: %v", code3, out3)
+	}
+	srvList, _ := s.st.ListServers()
+	nodes, _ := s.st.NodesByServer(srvList[0].ID)
+	if len(nodes) != 4 {
+		t.Fatalf("expected exactly 4 nodes after idempotent+reset_token calls, got %d", len(nodes))
+	}
+}
+
+func TestFullStackWARPAndCDNSubscription(t *testing.T) {
+	u := &store.User{UUID: "11111111-1111-1111-1111-111111111111", Password: "pw1"}
+	nodes := []subNode{
+		{Node: &store.Node{ServerID: 1, Name: "洛杉矶", Core: "singbox", Protocol: "hysteria2", Port: 44443, Settings: proto.NodeSettings{SNI: "la.example.com", CertMode: "acme_dns", HopPorts: "20000-40000"}}, Name: "🇺🇸 洛杉矶", Addr: "la.example.com", Country: "US"},
+		{Node: &store.Node{ServerID: 1, Name: "洛杉矶-TCP", Core: "xray", Protocol: "vless", Port: 443, Settings: proto.NodeSettings{Network: "tcp", Security: "reality", Flow: "xtls-rprx-vision", RealityPublicKey: "pub", RealityShortID: "abcd", RealityServerName: "www.apple.com"}}, Name: "🇺🇸 洛杉矶-TCP", Addr: "la.example.com", Country: "US"},
+		{Node: &store.Node{ServerID: 1, Name: "洛杉矶-CDN", Core: "singbox", Protocol: "vless", Port: 2053, Settings: proto.NodeSettings{Network: "ws", Path: "/ws-abc", Host: "cdn-la.example.com", Security: "tls", SNI: "cdn-la.example.com", ALPN: "http/1.1", CertMode: "acme_dns", Fingerprint: "chrome"}}, Name: "🇺🇸 洛杉矶-CDN", Addr: "cdn-la.example.com", Country: "US"},
+		{Node: &store.Node{ServerID: 1, Name: "洛杉矶-WARP", Core: "singbox", Protocol: "anytls", Port: 8446, Settings: proto.NodeSettings{SNI: "www.apple.com", ALPN: "h2,http/1.1", CertMode: "self", Fingerprint: "chrome", Outbound: "warp"}}, Name: "🇺🇸 洛杉矶-WARP", Addr: "la.example.com", Country: "US"},
+	}
+
+	clash := renderClash(nodes, u, "NodeHub", true, false)
+	for _, want := range []string{
+		`"name":"🛡️ WARP 出口"`,
+		`"name":"☁️ CF CDN"`,
+		`"name":"故障转移","proxies":["⚡ 高速 UDP","🛡️ 稳定 TCP","☁️ CF CDN"]`,
+		`"alpn":["http/1.1"]`,
+		`"alpn":["h2","http/1.1"]`,
+		`"client-fingerprint":"chrome"`,
+	} {
+		if !strings.Contains(clash, want) {
+			t.Fatalf("clash missing %q:\n%s", want, clash)
+		}
+	}
+
+	sb := renderSingbox(nodes, u, true, false)
+	for _, want := range []string{
+		`"tag": "🛡️ WARP 出口"`,
+		`"tag": "☁️ CF CDN"`,
+		`"type": "anytls"`,
+		`"fingerprint": "chrome"`,
+	} {
+		if !strings.Contains(sb, want) {
+			t.Fatalf("sing-box missing %q:\n%s", want, sb)
+		}
+	}
+
+	cdnLink := shareLink(nodes[2], u)
+	warpLink := shareLink(nodes[3], u)
+	if !strings.Contains(cdnLink, "alpn=http%2F1.1") || !strings.Contains(cdnLink, "type=ws") {
+		t.Fatalf("cdn shareLink mismatch: %s", cdnLink)
+	}
+	if !strings.Contains(warpLink, "alpn=h2%2Chttp%2F1.1") || !strings.Contains(warpLink, "insecure=1") {
+		t.Fatalf("warp shareLink mismatch: %s", warpLink)
+	}
+	if isRelayCapableVLESS(nodes[2].Node) {
+		t.Fatalf("WS CDN node must not be relay-capable")
+	}
+	warpVLESS := &store.Node{Enabled: true, Source: "local", Core: "singbox", Protocol: "vless", Settings: proto.NodeSettings{Network: "tcp", Security: "tls", Outbound: "warp"}}
+	if isRelayCapableVLESS(warpVLESS) {
+		t.Fatalf("WARP-outbound node must not be relay-capable")
 	}
 }
 

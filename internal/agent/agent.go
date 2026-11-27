@@ -332,14 +332,25 @@ func (a *Agent) applyLocked(cfg *proto.AgentConfig) error {
 	}
 	_ = os.MkdirAll(opt.ACMEDir, 0o700)
 	byCore := map[string][]proto.NodeConfig{}
+	needWARP := false
 	for _, n := range cfg.Nodes {
 		byCore[n.Core] = append(byCore[n.Core], n)
+		if n.Core == "singbox" && len(n.Users) > 0 && n.Settings.Outbound == "warp" {
+			needWARP = true
+		}
 		if NeedsCert(n) {
 			cert, key := certPaths(n, opt)
 			if err := EnsureSelfSigned(cert, key, n.Settings.SNI); err != nil {
 				return fmt.Errorf("生成证书失败 node %d: %w", n.ID, err)
 			}
 		}
+	}
+	if needWARP {
+		cred, err := EnsureWARPCred(filepath.Join(a.cfg.DataDir, "warp.json"))
+		if err != nil {
+			return fmt.Errorf("准备 WARP 出口失败: %w", err)
+		}
+		opt.WARP = cred
 	}
 	var errs []string
 	for name, core := range a.cores {

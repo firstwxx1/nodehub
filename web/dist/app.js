@@ -451,26 +451,33 @@ async function adoptFlow(serverId, reload) {
 }
 
 function dualStackModal(server, reload) {
-  const body = `<div class="note info" style="margin-bottom:12px">在「<b>${esc(server.name)}</b>」上一次性补齐 <b>Hysteria2（UDP + 端口跳跃 + Salamander）</b> 与 <b>VLESS-Reality（TCP 抗限速兜底）</b>。若面板已配置 Cloudflare 令牌，会自动创建 DNS A 记录并通过 DNS-01 申请可信域名证书（无需 80/443 端口）。</div>
+  const body = `<div class="note info" style="margin-bottom:12px">在「<b>${esc(server.name)}</b>」上一次性补齐核心四协议全栈：<b>VLESS-Reality (TCP 443)</b> + <b>Hysteria2 (UDP 跳跃)</b> + <b>CF 橙云 CDN (VLESS-WS-TLS 2053)</b> + <b>AnyTLS+WARP (8446 换出口 IP)</b>。已有节点会自动保留不重复创建。</div>
     <div class="form">
-      ${inp('证书域名 / 子域前缀', 'domain', '', { full: true, ph: '留空自动生成（如 jp2.你的CF根域名），也可直接填前缀如 jp2' })}
+      ${inp('证书域名 / 子域前缀', 'domain', '', { full: true, ph: '留空自动生成（如 la.你的CF根域名），CDN 自动建 cdn-前缀橙云记录' })}
+      ${inp('VLESS-Reality 端口 (TCP)', 'tcp_port', 443, { type: 'number', dtype: 'int', hint: '推荐 443；若被占用会自动回退' })}
       ${inp('Hysteria2 端口 (UDP)', 'hy2_port', 44443, { type: 'number', dtype: 'int' })}
-      ${inp('VLESS-Reality 端口 (TCP)', 'tcp_port', 44443, { type: 'number', dtype: 'int', hint: '可与 UDP 同端口号，互不冲突' })}
+      ${inp('CF CDN 端口 (TCP)', 'cdn_port', 2053, { type: 'number', dtype: 'int', hint: 'Cloudflare 代理端口（2053/2083/8443）' })}
+      ${inp('WARP 出口端口 (TCP)', 'warp_port', 8446, { type: 'number', dtype: 'int', hint: 'AnyTLS + 自动注册 WARP 绕过 IP 风控' })}
       ${inp('端口跳跃区间', 'hop_ports', '20000-40000', { ph: '填 none 关闭跳跃' })}
       ${inp('Reality 伪装目标', 'reality_dest', 'www.apple.com:443')}
-      ${inp('分组', 'groups', '', { ph: '留空 = 所有用户可用' })}
+      ${inp('分组', 'groups', '', { ph: '留空 = 所有用户可用', full: true })}
+      ${inp('', 'skip_cdn', false, { type: 'checkbox', hint: '跳过 CF 橙云 CDN 节点' })}
+      ${inp('', 'skip_warp', false, { type: 'checkbox', hint: '跳过 WARP 出口节点' })}
       ${inp('', 'no_cf', false, { type: 'checkbox', hint: '跳过 Cloudflare 域名与证书（改为自签证书）', full: true })}
     </div>`;
-  modal('一键双栈（Hy2 + Reality + CF 证书）', body, {
+  modal('一键四协议全栈（Reality 443 + Hy2 + CF CDN + WARP）', body, {
+    wide: true,
     okText: '一键创建',
     ok: async (m) => {
       const f = readForm(m);
       const r = await api('POST', `/api/servers/${server.id}/dual-stack`, f);
       const msgs = [];
       if (r.domain) msgs.push(`域名 ${r.domain}${r.dns_action ? '（CF ' + r.dns_action + '）' : ''}`);
-      if (r.hy2_node) msgs.push(`Hy2 :${r.hy2_node.port}/udp (${r.cert_mode || 'self'})`);
       if (r.vless_node) msgs.push(`Reality :${r.vless_node.port}/tcp`);
-      toast('已下发双栈：' + msgs.join(' · '));
+      if (r.hy2_node) msgs.push(`Hy2 :${r.hy2_node.port}/udp`);
+      if (r.cdn_node) msgs.push(`CDN :${r.cdn_node.port}/tcp`);
+      if (r.warp_node) msgs.push(`WARP :${r.warp_node.port}/tcp`);
+      toast('已下发全栈：' + msgs.join(' · '));
       reload && reload();
     },
   });
@@ -478,20 +485,21 @@ function dualStackModal(server, reload) {
 
 async function showDualStackCommandModal() {
   const baseUrl = location.origin;
-  const body = `<p style="margin-top:0">在任意全新 VPS 上以 root 执行下面这条命令，会自动：<b>注册服务器 → 写 Cloudflare DNS A 记录 → 安装 Agent/Xray/sing-box → 自动签发 CF DNS-01 证书 → 同时上线 Hysteria2 + VLESS-Reality TCP</b>。</p>
+  const body = `<p style="margin-top:0">在任意全新或重装 VPS 上以 root 执行下面这条命令，会自动：<b>注册/重接服务器 → 写 Cloudflare DNS + 橙云 CDN 记录 → 安装 Agent/Xray/sing-box → 签发 DNS-01 证书 + 自动注册 WARP → 同时上线 Reality 443 + Hy2 + CF CDN 2053 + WARP 8446</b>。</p>
     <div class="form">
       ${inp('API Key（write 权限）', 'api_key', '', { full: true, ph: '粘贴 nhk_ 开头的 API Key，或点下方按钮一键创建' })}
-      ${inp('服务器名称', 'name', '日本新机')}
-      ${inp('域名或子域前缀（可选）', 'domain', '', { ph: '留空自动生成；可填 jp2 或 jp2.你的域名' })}
+      ${inp('服务器名称', 'name', '洛杉矶')}
+      ${inp('域名或子域前缀（可选）', 'domain', '', { ph: '留空自动生成；可填 n15 或 la.你的域名' })}
+      ${inp('Reality 端口 (TCP)', 'tcp_port', 443, { type: 'number', dtype: 'int' })}
       ${inp('Hysteria2 端口 (UDP)', 'hy2_port', 44443, { type: 'number', dtype: 'int' })}
-      ${inp('VLESS-Reality 端口 (TCP)', 'tcp_port', 44443, { type: 'number', dtype: 'int' })}
+      ${inp('', 'reinstall', false, { type: 'checkbox', hint: '重接/覆盖已存在的离线服务器（自动重置 Agent 令牌并清理占用 443/2053 的旧代理服务）', full: true })}
     </div>
     <div class="codebox mt" id="dsCmd" style="font-size:12px;word-break:break-all"></div>
     <div class="btns mt">
       <button type="button" class="btn primary" id="copyDsCmd">${icon('copy')}复制一键命令</button>
       <button type="button" class="btn" id="genDsKey">一键生成专用 API Key</button>
     </div>`;
-  const m = modal('新机一键双栈命令（Hy2 + Reality + CF 证书）', body, { wide: true, cancelText: '关闭' });
+  const m = modal('新机一键四协议全栈命令（Reality + Hy2 + CF CDN + WARP）', body, { wide: true, cancelText: '关闭' });
   const root = m.el;
   const shEsc = (v) => String(v || '').replace(/'/g, "'\\''");
   const renderCmd = () => {
@@ -499,11 +507,12 @@ async function showDualStackCommandModal() {
     const key = f.api_key || '<你的_API_KEY>';
     let cmd = `curl -fsSL ${baseUrl}/dual-stack.sh | bash -s -- --key '${shEsc(key)}' --name '${shEsc(f.name || '新服务器')}'`;
     if (f.domain) cmd += ` --domain '${shEsc(f.domain)}'`;
+    if (f.tcp_port && Number(f.tcp_port) !== 443) cmd += ` --tcp-port ${f.tcp_port}`;
     if (f.hy2_port && Number(f.hy2_port) !== 44443) cmd += ` --hy2-port ${f.hy2_port}`;
-    if (f.tcp_port && Number(f.tcp_port) !== Number(f.hy2_port || 44443)) cmd += ` --tcp-port ${f.tcp_port}`;
+    if (f.reinstall) cmd += ' --reinstall';
     root.querySelector('#dsCmd').textContent = cmd;
   };
-  root.querySelectorAll('input').forEach((el) => { el.oninput = renderCmd; });
+  root.querySelectorAll('input').forEach((el) => { el.oninput = renderCmd; el.onchange = renderCmd; });
   renderCmd();
   root.querySelector('#copyDsCmd').onclick = () => copy(root.querySelector('#dsCmd').textContent);
   const genBtn = root.querySelector('#genDsKey');
@@ -530,7 +539,7 @@ PAGES.servers = async (el) => {
   const load = async () => {
     const list = await api('GET', '/api/servers');
     srvList = list;
-    const head = topbar('服务器', `${list.filter((s) => s.online).length} / ${list.length} 在线`, `<button class="btn" data-act="dualCmd">⚡ 新机一键双栈命令</button><button class="btn primary" data-act="add">${icon('plus')}添加服务器</button>`);
+    const head = topbar('服务器', `${list.filter((s) => s.online).length} / ${list.length} 在线`, `<button class="btn" data-act="dualCmd">⚡ 新机一键四协议全栈</button><button class="btn primary" data-act="add">${icon('plus')}添加服务器</button>`);
     if (!list.length) { el.innerHTML = head + `<div class="card empty">还没有服务器。点击右上角「添加服务器」，在 VPS 上运行一条安装命令即可接入。</div>`; return; }
     el.innerHTML = head + `<div class="card tbl-wrap"><table class="tbl"><thead><tr><th>服务器</th><th>状态</th><th>CPU</th><th>内存</th><th>磁盘</th><th>网速</th><th>本期流量</th><th>到期</th><th>Agent / 配置</th><th></th></tr></thead><tbody>
     ${list.map((s) => {
@@ -551,7 +560,7 @@ PAGES.servers = async (el) => {
         <td><div class="cell-2"><span>${s.agent_version ? 'v' + esc(s.agent_version) : '<span class="faint">—</span>'} · ${s.node_count} 节点</span>
           <small title="${esc(s.apply_error)}" class="${cfgOk ? '' : 'bad-t'}">${s.last_seen ? (cfgOk ? '配置已同步 ' + esc((s.applied_version || '').slice(0, 6)) : '⚠ ' + esc((s.apply_error || '').slice(0, 40))) : ''}</small>
           <small>${st.core_versions ? Object.entries(st.core_versions).filter(([, v]) => v).map(([k, v]) => `${k === 'singbox' ? 'sing-box' : k} ${esc(v)}${st.core_running && st.core_running[k] ? '' : ' (停)'}`).join(' · ') : ''}</small></div></td>
-        <td>${menu([['dualStack', '⚡ 一键双栈 (Hy2 + Reality + CF证书)'], ['edit', '编辑'], ['detail', '详情与命令记录'], ['adopt', '接入原版脚本节点'], ['import', '导入现有节点（由 NodeHub 接管）'], ['token', '重置令牌 / 安装命令'], ['cmd:restart_core', '重启内核'], ['cmd:reload', '重新下发配置'], ['cmd:unlock_test', '解锁检测'], ['cmd:upgrade_agent', '升级 Agent'], ['resetTraffic', '重置本期流量'], ['del', '删除', 'danger']])}</td>
+        <td>${menu([['dualStack', '⚡ 一键四协议全栈 (Reality + Hy2 + CDN + WARP)'], ['edit', '编辑'], ['detail', '详情与命令记录'], ['adopt', '接入原版脚本节点'], ['import', '导入现有节点（由 NodeHub 接管）'], ['token', '重置令牌 / 安装命令'], ['cmd:restart_core', '重启内核'], ['cmd:reload', '重新下发配置'], ['cmd:unlock_test', '解锁检测'], ['cmd:upgrade_agent', '升级 Agent'], ['resetTraffic', '重置本期流量'], ['del', '删除', 'danger']])}</td>
       </tr>`;
     }).join('')}</tbody></table></div>`;
   };
@@ -595,7 +604,9 @@ const protoLabel = (n) => {
   if (['vless', 'vmess', 'trojan'].includes(n.protocol)) { parts.push(s.network || 'tcp'); if (s.security && s.security !== 'none') parts.push(s.security); }
   if (n.protocol === 'shadowsocks') parts.push((s.cipher || '').replace('2022-blake3-', '2022-'));
   if (s.hop_ports) parts.push('跳跃 ' + s.hop_ports);
-  if (s.cert_mode === 'acme') parts.push('ACME');
+  if (s.outbound === 'warp') parts.push('WARP');
+  if (s.cert_mode === 'acme_dns') parts.push('CF-DNS');
+  else if (s.cert_mode === 'acme') parts.push('ACME');
   return parts.join(' · ');
 };
 
@@ -613,6 +624,7 @@ function nodeForm(n, servers, panels) {
     ${inp('监听地址', 'listen', n.listen, { ph: '默认 0.0.0.0（全部）' })}
     ${inp('客户端连接地址', 'address', n.address, { ph: '默认用服务器地址；可填 CDN/中转域名', hint: '写进订阅的地址' })}
     ${inp('检测 IP', 'egress_ip', n.egress_ip, { ph: '默认用服务器公网 IP', hint: '多 IP / 落地机时填出口 IP' })}
+    ${inp('出站路由', 'settings.outbound', s.outbound || '', { opts: [['', '直连（本机公网 IP）'], ['warp', 'Cloudflare WARP（自动注册，换出口 IP 解锁 AI / Google）']], when: 'core:singbox', hint: '仅 sing-box 内核支持；选 WARP 后该节点流量自动经 Cloudflare WARP 出站' })}
     ${inp('前置中转代理', 'settings.dialer_proxy', s.dialer_proxy, { ph: '可选，例如 🌏 亚洲中转 或亚洲节点名', hint: '写入 Clash dialer-proxy / sing-box detour / Surge underlying-proxy', full: true })}
 
     <h4 data-when="proto:vless,vmess,trojan">传输与安全</h4>
@@ -700,7 +712,13 @@ function wireNodeForm(m, nodeId, isNew) {
   f.addEventListener('change', (e) => { if (['server_id', 'protocol', 'settings.cert_mode'].includes(e.target.name)) checkPort(isNew && !val('port')); });
   setTimeout(() => checkPort(isNew && !val('port')), 0);
   const apply = () => {
-    const ctx = { proto: val('protocol'), net: val('settings.network'), sec: val('settings.security'), src: val('source'), cert: val('settings.cert_mode') };
+    const coreEl = $('[name=core]', f);
+    const proto = val('protocol');
+    const allowed = CORES[proto] || [];
+    [...coreEl.options].forEach((o) => { o.disabled = o.value && !allowed.includes(o.value); });
+    if (coreEl.value && !allowed.includes(coreEl.value)) coreEl.value = '';
+    const effCore = coreEl.value || allowed[0] || '';
+    const ctx = { proto, core: effCore, net: val('settings.network'), sec: val('settings.security'), src: val('source'), cert: val('settings.cert_mode') };
     const tlsish = ['hysteria2', 'tuic', 'anytls'].includes(ctx.proto) || (['vless', 'vmess', 'trojan'].includes(ctx.proto) && ctx.sec === 'tls');
     $$('[data-when]', f).forEach((el) => {
       const show = el.dataset.when.split(';').every((cond) => {
@@ -710,12 +728,8 @@ function wireNodeForm(m, nodeId, isNew) {
       });
       el.style.display = show ? '' : 'none';
     });
-    const core = $('[name=core]', f);
-    const allowed = CORES[ctx.proto] || [];
-    [...core.options].forEach((o) => { o.disabled = o.value && !allowed.includes(o.value); });
-    if (core.value && !allowed.includes(core.value)) core.value = '';
     const netSel = $('[name="settings.network"]', f);
-    [...netSel.options].forEach((o) => { o.disabled = o.value === 'xhttp' && core.value === 'singbox'; });
+    [...netSel.options].forEach((o) => { o.disabled = o.value === 'xhttp' && effCore === 'singbox'; });
   };
   f.addEventListener('change', apply);
   apply();

@@ -18,7 +18,10 @@ func TestRenderValidates(t *testing.T) {
 		t.Skip("XRAY_BIN / SINGBOX_BIN not set")
 	}
 	dir := t.TempDir()
-	opt := RenderOptions{XrayAPIPort: 10085, SingboxAPIPort: 10086, BlockPrivate: true, BlockBT: true, CertDir: dir, ACMEDir: dir + "/acme", IPv4Only: true}
+	opt := RenderOptions{
+		XrayAPIPort: 10085, SingboxAPIPort: 10086, BlockPrivate: true, BlockBT: true, CertDir: dir, ACMEDir: dir + "/acme", IPv4Only: true,
+		WARP: &WARPCred{PrivateKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", PeerPubKey: "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=", Endpoint: "162.159.192.1:2408", AddressV4: "172.16.0.2", AddressV6: "2606:4700:110::1", Reserved: []int{1, 2, 3}},
+	}
 	priv, pub, _ := util.RealityKeyPair()
 	uid := util.UUID()
 	mk := func(id int64, core, proto_ string, s proto.NodeSettings) proto.NodeConfig {
@@ -42,7 +45,7 @@ func TestRenderValidates(t *testing.T) {
 		mk(9, "xray", "vless", proto.NodeSettings{Network: "httpupgrade", Path: "/hu"}),
 		mk(11, "singbox", "hysteria2", proto.NodeSettings{SNI: "d.example.com", UpMbps: 100, DownMbps: 100, Obfs: "salamander", ObfsPassword: "x"}),
 		mk(12, "singbox", "tuic", proto.NodeSettings{SNI: "e.example.com"}),
-		mk(13, "singbox", "anytls", proto.NodeSettings{SNI: "f.example.com"}),
+		mk(13, "singbox", "anytls", proto.NodeSettings{SNI: "f.example.com", Outbound: "warp"}),
 		mk(14, "singbox", "vless", reality),
 		mk(15, "singbox", "shadowsocks", proto.NodeSettings{Cipher: "2022-blake3-aes-256-gcm", ServerKey: util.SSServerKey("2022-blake3-aes-256-gcm")}),
 		mk(16, "singbox", "trojan", proto.NodeSettings{Network: "ws", Path: "/t", Security: "tls", SNI: "g.example.com"}),
@@ -50,6 +53,7 @@ func TestRenderValidates(t *testing.T) {
 		mk(18, "singbox", "hysteria2", proto.NodeSettings{SNI: "hy.example.com", CertMode: "acme", ACMEEmail: "a@example.com", UpMbps: 1000, DownMbps: 1000,
 			Obfs: "salamander", ObfsPassword: "x", HopPorts: "30000-40000", Masquerade: "https://www.bing.com"}),
 		mk(19, "singbox", "hysteria2", proto.NodeSettings{SNI: "us.example.com", CertMode: "acme_dns", ACMEDNSProvider: "cloudflare", ACMEDNSToken: "tok", ACMEEmail: "a@example.com"}),
+		mk(20, "singbox", "vless", proto.NodeSettings{Network: "ws", Path: "/ws-cdn", Host: "cdn.example.com", Security: "tls", SNI: "cdn.example.com", ALPN: "http/1.1", CertMode: "acme_dns", ACMEDNSProvider: "cloudflare", ACMEDNSToken: "tok", ACMEEmail: "a@example.com"}),
 	}
 	relays := []proto.RelayOutbound{{
 		Tag: "relay-n50", Protocol: "vless", Address: "192.3.173.122", Port: 44443, UUID: uid,

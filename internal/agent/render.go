@@ -25,7 +25,8 @@ type RenderOptions struct {
 	BlockBT        bool
 	CertDir        string
 	ACMEDir        string
-	IPv4Only       bool // server has no IPv6 route: resolve destinations to IPv4 only
+	IPv4Only       bool      // server has no IPv6 route: resolve destinations to IPv4 only
+	WARP           *WARPCred // optional local Cloudflare WARP WireGuard credentials
 }
 
 func splitALPN(s string, def []string) []string {
@@ -272,7 +273,7 @@ func RenderSingbox(nodes []proto.NodeConfig, opt RenderOptions, relays ...proto.
 	// for the full timeout. Hysteria2 inbounds therefore sniff UDP only, where
 	// each datagram arrives with its payload (BitTorrent's DHT/uTP is still
 	// caught there).
-	var sniffAll, sniffUDPOnly []string
+	var sniffAll, sniffUDPOnly, warpInbounds []string
 	for _, n := range nodes {
 		if n.Core != "singbox" || len(n.Users) == 0 {
 			continue
@@ -288,6 +289,9 @@ func RenderSingbox(nodes []proto.NodeConfig, opt RenderOptions, relays ...proto.
 			sniffUDPOnly = append(sniffUDPOnly, tag)
 		} else {
 			sniffAll = append(sniffAll, tag)
+		}
+		if n.Settings.Outbound == "warp" {
+			warpInbounds = append(warpInbounds, tag)
 		}
 		for _, u := range n.Users {
 			users = append(users, u.Key)
@@ -306,6 +310,14 @@ func RenderSingbox(nodes []proto.NodeConfig, opt RenderOptions, relays ...proto.
 	}
 	if opt.BlockPrivate {
 		rules = append(rules, map[string]any{"ip_is_private": true, "action": "reject"})
+	}
+	var endpoints []any
+	if len(warpInbounds) > 0 {
+		if opt.WARP == nil {
+			return nil, fmt.Errorf("WARP 出口凭据未就绪")
+		}
+		endpoints = append(endpoints, singboxWARPEndpoint(opt.WARP))
+		rules = append(rules, map[string]any{"inbound": warpInbounds, "outbound": "warp"})
 	}
 	outbounds := []any{map[string]any{"type": "direct", "tag": "direct"}}
 	for _, r := range relays {
@@ -336,7 +348,42 @@ func RenderSingbox(nodes []proto.NodeConfig, opt RenderOptions, relays ...proto.
 			},
 		},
 	}
+	if len(endpoints) > 0 {
+		cfg["endpoints"] = endpoints
+	}
 	return json.MarshalIndent(cfg, "", "  ")
+}
+
+func singboxWARPEndpoint(w *WARPCred) map[string]any {
+	host, portStr, err := net.SplitHostPort(orDefault(w.Endpoint, defaultWARPEndpoint))
+	if err != nil || host == "" {
+		host, portStr = "162.159.192.1", "2408"
+	}
+	port, _ := strconv.Atoi(portStr)
+	if port <= 0 {
+		port = 2408
+	}
+	addrs := []string{w.AddressV4 + "/32"}
+	if w.AddressV6 != "" {
+		addrs = append(addrs, w.AddressV6+"/128")
+	}
+	peer := map[string]any{
+		"address":     host,
+		"port":        port,
+		"public_key":  w.PeerPubKey,
+		"allowed_ips": []string{"0.0.0.0/0", "::/0"},
+	}
+	if len(w.Reserved) == 3 {
+		peer["reserved"] = w.Reserved
+	}
+	return map[string]any{
+		"type":        "wireguard",
+		"tag":         "warp",
+		"address":     addrs,
+		"private_key": w.PrivateKey,
+		"mtu":         1280,
+		"peers":       []any{peer},
+	}
 }
 
 func singboxRelayOutbound(r proto.RelayOutbound) map[string]any {

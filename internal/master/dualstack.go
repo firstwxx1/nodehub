@@ -137,6 +137,11 @@ func cfMatchZone(zones []cfZone, fqdn string) *cfZone {
 
 // cfUpsertRecord creates or updates a DNS-only (proxied=false) A/AAAA record in Cloudflare.
 func cfUpsertRecord(token, fqdn, ip string) (action string, err error) {
+	return cfUpsertRecordProxied(token, fqdn, ip, false)
+}
+
+// cfUpsertRecordProxied creates or updates an A/AAAA record in Cloudflare with explicit proxy (orange cloud) control.
+func cfUpsertRecordProxied(token, fqdn, ip string, proxied bool) (action string, err error) {
 	ip = strings.TrimSpace(ip)
 	parsed := net.ParseIP(ip)
 	if parsed == nil {
@@ -163,16 +168,20 @@ func cfUpsertRecord(token, fqdn, ip string) (action string, err error) {
 	if err := cfDo(token, "GET", "/zones/"+zone.ID+"/dns_records?"+q.Encode(), nil, &existing); err != nil {
 		return "", err
 	}
+	ttl := 120
+	if proxied {
+		ttl = 1 // Cloudflare Auto TTL for orange-cloud proxied records
+	}
 	payload := map[string]any{
 		"type":    recType,
 		"name":    fqdn,
 		"content": ip,
-		"ttl":     120,
-		"proxied": false,
+		"ttl":     ttl,
+		"proxied": proxied,
 	}
 	if len(existing) > 0 {
 		rec := existing[0]
-		if rec.Content == ip && !rec.Proxied {
+		if rec.Content == ip && rec.Proxied == proxied {
 			return "unchanged", nil
 		}
 		if err := cfDo(token, "PUT", "/zones/"+zone.ID+"/dns_records/"+rec.ID, payload, nil); err != nil {
@@ -203,28 +212,81 @@ func dnsLabelSlug(name string, serverID int64) string {
 
 type dualStackReq struct {
 	Domain      string `json:"domain"`       // FQDN (jp2.example.com) or bare subdomain label (jp2); empty = auto when CF enabled
-	NoCF        bool   `json:"no_cf"`        // skip Cloudflare DNS & use self-signed cert for Hysteria2
+	NoCF        bool   `json:"no_cf"`        // skip Cloudflare DNS & use self-signed cert for Hysteria2 / CDN
 	Hy2Port     int    `json:"hy2_port"`     // default 44443 (UDP)
-	TCPPort     int    `json:"tcp_port"`     // default same as hy2_port (TCP), coexists with UDP
+	TCPPort     int    `json:"tcp_port"`     // default 443 (TCP), falls back to hy2_port / 8443 if occupied
+	CDNPort     int    `json:"cdn_port"`     // default 2053 (TCP, Cloudflare orange-cloud HTTPS port)
+	CDNDomain   string `json:"cdn_domain"`   // optional override; default "cdn-" + fqdn
+	WARPPort    int    `json:"warp_port"`    // default 8446 (TCP, AnyTLS + Cloudflare WARP outbound)
 	HopPorts    string `json:"hop_ports"`    // default "20000-40000"; pass "none" to disable
 	RealityDest string `json:"reality_dest"` // default "www.apple.com:443"
 	Hy2Name     string `json:"hy2_name"`     // default srv.Name
 	TCPName     string `json:"tcp_name"`     // default srv.Name + "-TCP"
+	CDNName     string `json:"cdn_name"`     // default srv.Name + "-CDN"
+	WARPName    string `json:"warp_name"`    // default srv.Name + "-WARP"
 	Groups      string `json:"groups"`
-	Force       bool   `json:"force"`        // create even if server already has hy2 / vless
-	IP          string `json:"ip"`           // optional override when server has not sent first heartbeat yet
+	Force       bool   `json:"force"`       // create even if server already has matching protocol
+	IP          string `json:"ip"`          // optional override when server has not sent first heartbeat yet
 	SkipHy2     bool   `json:"skip_hy2"`
 	SkipReality bool   `json:"skip_reality"`
+	SkipCDN     bool   `json:"skip_cdn"`
+	SkipWARP    bool   `json:"skip_warp"`
+	ResetToken  bool   `json:"reset_token"` // openProvision: reset agent token & return fresh install_command for existing server
 }
 
 type dualStackRes struct {
-	Server    *store.Server `json:"server"`
-	Domain    string        `json:"domain,omitempty"`
-	DNSAction string        `json:"dns_action,omitempty"`
-	CertMode  string        `json:"cert_mode,omitempty"`
-	Hy2Node   *store.Node   `json:"hy2_node,omitempty"`
-	VlessNode *store.Node   `json:"vless_node,omitempty"`
-	Warnings  []string      `json:"warnings,omitempty"`
+	Server       *store.Server `json:"server"`
+	Domain       string        `json:"domain,omitempty"`
+	DNSAction    string        `json:"dns_action,omitempty"`
+	CDNDomain    string        `json:"cdn_domain,omitempty"`
+	CDNDNSAction string        `json:"cdn_dns_action,omitempty"`
+	CertMode     string        `json:"cert_mode,omitempty"`
+	Hy2Node      *store.Node   `json:"hy2_node,omitempty"`
+	VlessNode    *store.Node   `json:"vless_node,omitempty"`
+	CDNNode      *store.Node   `json:"cdn_node,omitempty"`
+	WARPNode     *store.Node   `json:"warp_node,omitempty"`
+	Warnings     []string      `json:"warnings,omitempty"`
+}
+
+func (s *Server) isPortBusyForProvision(srvID int64, transport string, port int, existing []*store.Node) bool {
+	if port < 1 || port > 65535 {
+		return true
+	}
+	if snap, known := s.ports.get(srvID); known {
+		if _, busy := occupant(snap.list, []string{transport}, port); busy {
+			return true
+		}
+	}
+	for _, o := range existing {
+		if o.Port == port {
+			for _, t := range nodeTransports(o) {
+				if t == transport {
+					return true
+				}
+			}
+		}
+		if olo, ohi, err := parseHopRange(o.Settings.HopPorts); err == nil && port >= olo && port <= ohi {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) pickProvisionPort(srvID int64, transport string, existing []*store.Node, candidates ...int) int {
+	seen := map[int]bool{}
+	for _, p := range candidates {
+		if p < 1 || p > 65535 || seen[p] {
+			continue
+		}
+		seen[p] = true
+		if !s.isPortBusyForProvision(srvID, transport, p, existing) {
+			return p
+		}
+	}
+	if p := s.defaultPort(srvID, []string{transport}, 0); p > 0 && !s.isPortBusyForProvision(srvID, transport, p, existing) {
+		return p
+	}
+	return s.suggestPort(srvID, []string{transport}, 20443, 0)
 }
 
 func (s *Server) provisionDualStack(srv *store.Server, req dualStackReq) (*dualStackRes, error) {
@@ -247,28 +309,36 @@ func (s *Server) provisionDualStack(srv *store.Server, req dualStackReq) (*dualS
 	// 1. Resolve domain & optionally upsert Cloudflare DNS A record
 	fqdn := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(req.Domain), "."))
 	if !req.NoCF && cfToken != "" {
+		ensureBase := func() error {
+			if baseDomain != "" {
+				return nil
+			}
+			zones, err := cfListZones(cfToken)
+			if err != nil {
+				return err
+			}
+			if len(zones) > 0 {
+				baseDomain = zones[0].Name
+			}
+			return nil
+		}
 		if fqdn == "" {
-			if baseDomain == "" {
-				zones, err := cfListZones(cfToken)
-				if err != nil {
-					return nil, err
-				}
-				if len(zones) > 0 {
-					baseDomain = zones[0].Name
+			if err := ensureBase(); err != nil {
+				return nil, err
+			}
+			// Preserve an existing custom domain on srv.Host if it belongs to our CF zones.
+			hostCand := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(srv.Host), "."))
+			if hostCand != "" && net.ParseIP(hostCand) == nil && strings.Contains(hostCand, ".") {
+				if zones, err := cfListZones(cfToken); err == nil && cfMatchZone(zones, hostCand) != nil {
+					fqdn = hostCand
 				}
 			}
-			if baseDomain != "" {
+			if fqdn == "" && baseDomain != "" {
 				fqdn = dnsLabelSlug(srv.Name, srv.ID) + "." + baseDomain
 			}
 		} else if !strings.Contains(fqdn, ".") {
-			if baseDomain == "" {
-				zones, err := cfListZones(cfToken)
-				if err != nil {
-					return nil, err
-				}
-				if len(zones) > 0 {
-					baseDomain = zones[0].Name
-				}
+			if err := ensureBase(); err != nil {
+				return nil, err
 			}
 			if baseDomain == "" {
 				return nil, fmt.Errorf("请填写完整域名（例如 %s.example.com），或在设置里填写默认根域名", fqdn)
@@ -299,15 +369,35 @@ func (s *Server) provisionDualStack(srv *store.Server, req dualStackReq) (*dualS
 		}
 	}
 
+	emailForDomain := func(d string) string {
+		if acmeEmail != "" {
+			return acmeEmail
+		}
+		parts := strings.Split(d, ".")
+		if len(parts) >= 2 {
+			return "admin@" + strings.Join(parts[len(parts)-2:], ".")
+		}
+		return ""
+	}
+
 	// Inspect existing nodes on this server
 	existing, _ := s.st.NodesByServer(srv.ID)
-	var hasHy2, hasVless *store.Node
+	var hasHy2, hasVless, hasCDN, hasWARP *store.Node
 	for _, n := range existing {
-		if n.Enabled && n.Protocol == "hysteria2" && hasHy2 == nil {
+		if !n.Enabled {
+			continue
+		}
+		if n.Protocol == "hysteria2" && hasHy2 == nil {
 			hasHy2 = n
 		}
-		if n.Enabled && n.Protocol == "vless" && n.Settings.Security == "reality" && hasVless == nil {
+		if n.Protocol == "vless" && n.Settings.Security == "reality" && strings.TrimSpace(n.Settings.Outbound) == "" && hasVless == nil {
 			hasVless = n
+		}
+		if n.Protocol == "vless" && n.Settings.Network == "ws" && n.Settings.Security == "tls" && hasCDN == nil {
+			hasCDN = n
+		}
+		if strings.EqualFold(strings.TrimSpace(n.Settings.Outbound), "warp") && hasWARP == nil {
+			hasWARP = n
 		}
 	}
 
@@ -333,17 +423,6 @@ func (s *Server) provisionDualStack(srv *store.Server, req dualStackReq) (*dualS
 			}
 		}
 	}
-	tcpPort := req.TCPPort
-	if tcpPort == 0 {
-		tcpPort = hy2Port
-	}
-	// If an existing Hysteria2 node already holds hop_ports and tcpPort collides with its range, move tcpPort to 8443
-	for _, o := range existing {
-		if olo, ohi, err := parseHopRange(o.Settings.HopPorts); err == nil && tcpPort >= olo && tcpPort <= ohi {
-			tcpPort = 8443
-			break
-		}
-	}
 
 	// 2. Create Hysteria2 node (sing-box native + Cloudflare DNS-01 ACME when domain+CF available)
 	if !req.SkipHy2 {
@@ -366,17 +445,10 @@ func (s *Server) provisionDualStack(srv *store.Server, req dualStackReq) (*dualS
 					certMode = "acme"
 				}
 			}
-			email := acmeEmail
-			if email == "" && fqdn != "" {
-				parts := strings.Split(fqdn, ".")
-				if len(parts) >= 2 {
-					email = "admin@" + strings.Join(parts[len(parts)-2:], ".")
-				}
-			}
 			st := proto.NodeSettings{
 				SNI:          sni,
 				CertMode:     certMode,
-				ACMEEmail:    email,
+				ACMEEmail:    emailForDomain(fqdn),
 				UpMbps:       1000,
 				DownMbps:     1000,
 				Obfs:         "salamander",
@@ -397,7 +469,7 @@ func (s *Server) provisionDualStack(srv *store.Server, req dualStackReq) (*dualS
 				Sort:     5,
 				Enabled:  true,
 				Source:   "local",
-				Note:     "一键双栈 Hysteria2",
+				Note:     "一键全栈 Hysteria2",
 			}
 			if err := s.normalizeNode(n); err != nil {
 				return nil, fmt.Errorf("创建 Hysteria2 节点失败: %w", err)
@@ -409,15 +481,24 @@ func (s *Server) provisionDualStack(srv *store.Server, req dualStackReq) (*dualS
 			n.ID = id
 			res.Hy2Node = n
 			res.CertMode = certMode
+			existing = append(existing, n)
 		}
 	}
 
-	// 3. Create VLESS + Reality (TCP) fallback node (Xray native)
+	// 3. Create VLESS + Reality (TCP 443 preferred, auto-fallback if occupied)
 	if !req.SkipReality {
 		if hasVless != nil && !req.Force {
 			res.VlessNode = hasVless
 			res.Warnings = append(res.Warnings, fmt.Sprintf("服务器上已有 VLESS-Reality 节点「%s」（端口 %d），已保留未重复创建", hasVless.Name, hasVless.Port))
 		} else {
+			wantTCP := req.TCPPort
+			if wantTCP == 0 {
+				wantTCP = 443
+			}
+			tcpPort := s.pickProvisionPort(srv.ID, "tcp", existing, wantTCP, hy2Port, 8443, 4443)
+			if tcpPort != wantTCP {
+				res.Warnings = append(res.Warnings, fmt.Sprintf("TCP 端口 %d 已被占用，VLESS-Reality 已自动回退至端口 %d", wantTCP, tcpPort))
+			}
 			tcpName := strings.TrimSpace(req.TCPName)
 			if tcpName == "" {
 				tcpName = srv.Name + "-TCP"
@@ -448,7 +529,7 @@ func (s *Server) provisionDualStack(srv *store.Server, req dualStackReq) (*dualS
 				Sort:     15,
 				Enabled:  true,
 				Source:   "local",
-				Note:     "一键双栈 VLESS-Reality TCP",
+				Note:     "一键全栈 VLESS-Reality TCP",
 			}
 			if err := s.normalizeNode(n); err != nil {
 				return nil, fmt.Errorf("创建 VLESS-Reality 节点失败: %w", err)
@@ -459,6 +540,143 @@ func (s *Server) provisionDualStack(srv *store.Server, req dualStackReq) (*dualS
 			}
 			n.ID = id
 			res.VlessNode = n
+			existing = append(existing, n)
+		}
+	}
+
+	// 4. Create Cloudflare Orange-Cloud CDN fallback node (sing-box VLESS + WS + TLS on CF HTTPS port 2053)
+	if !req.SkipCDN {
+		if hasCDN != nil && !req.Force {
+			res.CDNNode = hasCDN
+			res.CDNDomain = orStr(hasCDN.Address, hasCDN.Settings.SNI)
+			if !req.NoCF && cfToken != "" && res.CDNDomain != "" && ip != "" {
+				if act, err := cfUpsertRecordProxied(cfToken, res.CDNDomain, ip, true); err == nil {
+					res.CDNDNSAction = act
+				}
+			}
+			res.Warnings = append(res.Warnings, fmt.Sprintf("服务器上已有 CF CDN 节点「%s」（端口 %d），已保留未重复创建", hasCDN.Name, hasCDN.Port))
+		} else if req.NoCF || cfToken == "" {
+			res.Warnings = append(res.Warnings, "未配置 Cloudflare API 令牌或已跳过 CF，未创建 CF 橙云 CDN 节点")
+		} else {
+			cdnFQDN := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(req.CDNDomain), "."))
+			if cdnFQDN == "" && fqdn != "" {
+				if strings.HasPrefix(fqdn, "cdn-") {
+					cdnFQDN = fqdn
+				} else {
+					cdnFQDN = "cdn-" + fqdn
+				}
+			} else if cdnFQDN != "" && !strings.Contains(cdnFQDN, ".") && baseDomain != "" {
+				cdnFQDN = cdnFQDN + "." + baseDomain
+			}
+			if cdnFQDN == "" {
+				res.Warnings = append(res.Warnings, "缺少可用域名，跳过 CF 橙云 CDN 节点创建")
+			} else {
+				if ip == "" {
+					res.Warnings = append(res.Warnings, "服务器尚未上报公网 IP，跳过 CF 橙云 CDN DNS 记录写入")
+				} else {
+					act, err := cfUpsertRecordProxied(cfToken, cdnFQDN, ip, true)
+					if err != nil {
+						return nil, fmt.Errorf("写入 CF 橙云 CDN 记录失败: %w", err)
+					}
+					res.CDNDNSAction = act
+				}
+				res.CDNDomain = cdnFQDN
+				wantCDN := req.CDNPort
+				if wantCDN == 0 {
+					wantCDN = 2053
+				}
+				cdnPort := s.pickProvisionPort(srv.ID, "tcp", existing, wantCDN, 2053, 2083, 2087, 2096, 8443)
+				cdnName := strings.TrimSpace(req.CDNName)
+				if cdnName == "" {
+					cdnName = srv.Name + "-CDN"
+				}
+				st := proto.NodeSettings{
+					Network:     "ws",
+					Path:        "/ws-" + util.RandHex(6),
+					Host:        cdnFQDN,
+					Security:    "tls",
+					SNI:         cdnFQDN,
+					ALPN:        "http/1.1",
+					CertMode:    "acme_dns",
+					ACMEEmail:   emailForDomain(cdnFQDN),
+					Fingerprint: "chrome",
+				}
+				n := &store.Node{
+					ServerID: srv.ID,
+					Name:     cdnName,
+					Core:     "singbox",
+					Protocol: "vless",
+					Port:     cdnPort,
+					Address:  cdnFQDN,
+					Settings: st,
+					Rate:     1,
+					Groups:   strings.TrimSpace(req.Groups),
+					Sort:     25,
+					Enabled:  true,
+					Source:   "local",
+					Note:     "一键全栈 CF 橙云 CDN",
+				}
+				if err := s.normalizeNode(n); err != nil {
+					return nil, fmt.Errorf("创建 CF CDN 节点失败: %w", err)
+				}
+				id, err := s.st.CreateNode(n)
+				if err != nil {
+					return nil, fmt.Errorf("保存 CF CDN 节点失败: %w", err)
+				}
+				n.ID = id
+				res.CDNNode = n
+				existing = append(existing, n)
+			}
+		}
+	}
+
+	// 5. Create AnyTLS + Cloudflare WARP Outbound node (sing-box native WireGuard WARP on TCP 8446)
+	if !req.SkipWARP {
+		if hasWARP != nil && !req.Force {
+			res.WARPNode = hasWARP
+			res.Warnings = append(res.Warnings, fmt.Sprintf("服务器上已有 WARP 出口节点「%s」（端口 %d），已保留未重复创建", hasWARP.Name, hasWARP.Port))
+		} else {
+			wantWARP := req.WARPPort
+			if wantWARP == 0 {
+				wantWARP = 8446
+			}
+			warpPort := s.pickProvisionPort(srv.ID, "tcp", existing, wantWARP, 8446, 8447, 8448, 9443)
+			warpName := strings.TrimSpace(req.WARPName)
+			if warpName == "" {
+				warpName = srv.Name + "-WARP"
+			}
+			st := proto.NodeSettings{
+				SNI:         "www.apple.com",
+				ALPN:        "h2,http/1.1",
+				CertMode:    "self",
+				Fingerprint: "chrome",
+				Outbound:    "warp",
+			}
+			n := &store.Node{
+				ServerID: srv.ID,
+				Name:     warpName,
+				Core:     "singbox",
+				Protocol: "anytls",
+				Port:     warpPort,
+				Address:  fqdn,
+				Settings: st,
+				Rate:     1,
+				Groups:   strings.TrimSpace(req.Groups),
+				Sort:     35,
+				Enabled:  true,
+				Source:   "local",
+				Note:     "一键全栈 AnyTLS + WARP 出口",
+			}
+			if err := s.normalizeNode(n); err != nil {
+				return nil, fmt.Errorf("创建 WARP 节点失败: %w", err)
+			}
+			id, err := s.st.CreateNode(n)
+			if err != nil {
+				return nil, fmt.Errorf("保存 WARP 节点失败: %w", err)
+			}
+			n.ID = id
+			res.WARPNode = n
+			existing = append(existing, n)
 		}
 	}
 
@@ -486,7 +704,7 @@ func (s *Server) handleServerDualStack(w http.ResponseWriter, r *http.Request, a
 		writeErr(w, 400, err.Error())
 		return
 	}
-	s.audit(r, a, "server.dual_stack", fmt.Sprint(srv.ID), fmt.Sprintf("domain=%s dns=%s cert=%s", res.Domain, res.DNSAction, res.CertMode))
+	s.audit(r, a, "server.dual_stack", fmt.Sprint(srv.ID), fmt.Sprintf("domain=%s dns=%s cdn=%s cert=%s", res.Domain, res.DNSAction, res.CDNDomain, res.CertMode))
 	ok(w, res)
 }
 
@@ -563,6 +781,13 @@ func (s *Server) openProvisionDualStack(w http.ResponseWriter, r *http.Request, 
 		if changed {
 			_ = s.st.UpdateServer(srv)
 		}
+		if req.ResetToken {
+			token = util.RandToken(24)
+			if err := s.st.SetServerToken(srv.ID, util.SHA256Hex(token)); err != nil {
+				writeErr(w, 500, err.Error())
+				return
+			}
+		}
 	}
 
 	res, err := s.provisionDualStack(srv, req.dualStackReq)
@@ -574,7 +799,7 @@ func (s *Server) openProvisionDualStack(w http.ResponseWriter, r *http.Request, 
 	if token != "" {
 		installCmd = s.installCommand(r, token)
 	}
-	s.audit(r, nil, "open.provision", fmt.Sprint(srv.ID), fmt.Sprintf("key=%s name=%s domain=%s dns=%s", k.Name, srv.Name, res.Domain, res.DNSAction))
+	s.audit(r, nil, "open.provision", fmt.Sprint(srv.ID), fmt.Sprintf("key=%s name=%s domain=%s cdn=%s dns=%s", k.Name, srv.Name, res.Domain, res.CDNDomain, res.DNSAction))
 	ok(w, map[string]any{
 		"server":          res.Server,
 		"created_server":  createdServer,
@@ -582,9 +807,13 @@ func (s *Server) openProvisionDualStack(w http.ResponseWriter, r *http.Request, 
 		"install_command": installCmd,
 		"domain":          res.Domain,
 		"dns_action":      res.DNSAction,
+		"cdn_domain":      res.CDNDomain,
+		"cdn_dns_action":  res.CDNDNSAction,
 		"cert_mode":       res.CertMode,
 		"hy2_node":        res.Hy2Node,
 		"vless_node":      res.VlessNode,
+		"cdn_node":        res.CDNNode,
+		"warp_node":       res.WARPNode,
 		"warnings":        res.Warnings,
 	})
 }
