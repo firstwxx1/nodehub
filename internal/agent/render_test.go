@@ -19,7 +19,7 @@ func TestRenderValidates(t *testing.T) {
 	}
 	dir := t.TempDir()
 	opt := RenderOptions{XrayAPIPort: 10085, SingboxAPIPort: 10086, BlockPrivate: true, BlockBT: true, CertDir: dir, ACMEDir: dir + "/acme", IPv4Only: true}
-	priv, _, _ := util.RealityKeyPair()
+	priv, pub, _ := util.RealityKeyPair()
 	uid := util.UUID()
 	mk := func(id int64, core, proto_ string, s proto.NodeSettings) proto.NodeConfig {
 		pw := uid
@@ -51,6 +51,12 @@ func TestRenderValidates(t *testing.T) {
 			Obfs: "salamander", ObfsPassword: "x", HopPorts: "30000-40000", Masquerade: "https://www.bing.com"}),
 		mk(19, "singbox", "hysteria2", proto.NodeSettings{SNI: "us.example.com", CertMode: "acme_dns", ACMEDNSProvider: "cloudflare", ACMEDNSToken: "tok", ACMEEmail: "a@example.com"}),
 	}
+	relays := []proto.RelayOutbound{{
+		Tag: "relay-n50", Protocol: "vless", Address: "192.3.173.122", Port: 44443, UUID: uid,
+		Flow: "xtls-rprx-vision", Network: "tcp", Security: "reality", SNI: "www.apple.com",
+		Fingerprint: "chrome", RealityPublicKey: pub, RealityShortID: "abcd1234",
+		UserKeys: []string{"n1.u1", "n11.u1"},
+	}}
 	for _, n := range nodes {
 		if NeedsCert(n) {
 			c, k := certPaths(n, opt)
@@ -59,11 +65,11 @@ func TestRenderValidates(t *testing.T) {
 			}
 		}
 	}
-	xb, err := RenderXray(nodes, opt)
+	xb, err := RenderXray(nodes, opt, relays...)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sb, err := RenderSingbox(nodes, opt)
+	sb, err := RenderSingbox(nodes, opt, relays...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,6 +179,65 @@ func TestEnsureHy2StableQUIC(t *testing.T) {
 	b2, _ := os.ReadFile(p2)
 	if !containsAll(string(b2), "quic:", "maxIdleTimeout: 60s", "disablePathMTUDiscovery: true") {
 		t.Fatalf("unexpected appended config:\n%s", string(b2))
+	}
+}
+
+func TestRenderServerRelays(t *testing.T) {
+	priv, pub, _ := util.RealityKeyPair()
+	uDirect := util.UUID()
+	uRelay := util.UUID()
+	uLanding := util.UUID()
+	dir := t.TempDir()
+	opt := RenderOptions{XrayAPIPort: 10085, SingboxAPIPort: 10086, BlockPrivate: true, BlockBT: true, CertDir: dir, ACMEDir: dir + "/acme"}
+
+	xNodes := []proto.NodeConfig{{
+		ID: 39, Core: "xray", Protocol: "vless", Port: 44443,
+		Settings: proto.NodeSettings{Network: "tcp", Security: "reality", Flow: "xtls-rprx-vision", RealityDest: "www.apple.com:443", RealityPrivateKey: priv, RealityShortID: "abcd"},
+		Users: []proto.NodeUser{
+			{Key: "n39.u1", UUID: uDirect},
+			{Key: "n39.u1.r50", UUID: uRelay},
+		},
+	}}
+	relays := []proto.RelayOutbound{
+		{
+			Tag: "relay-n50", Protocol: "vless", Address: "192.3.173.122", Port: 44443, UUID: uLanding,
+			Flow: "xtls-rprx-vision", Network: "tcp", Security: "reality", SNI: "www.apple.com",
+			Fingerprint: "chrome", RealityPublicKey: pub, RealityShortID: "1234",
+			UserKeys: []string{"n39.u1.r50", "n999.u1.r50"},
+		},
+		{
+			Tag: "relay-unused", Protocol: "vless", Address: "1.2.3.4", Port: 443, UUID: uLanding,
+			UserKeys: []string{"n888.u1.r99"},
+		},
+	}
+	xb, err := RenderXray(xNodes, opt, relays...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	xs := string(xb)
+	if !containsAll(xs, `"tag": "relay-n50"`, `"address": "192.3.173.122"`, `"outboundTag": "relay-n50"`, `"n39.u1.r50"`) {
+		t.Fatalf("xray relay missing expected entries:\n%s", xs)
+	}
+	if containsAll(xs, "relay-unused") || containsAll(xs, "n999.u1.r50") {
+		t.Fatalf("xray relay leaked unmatched outbound/user:\n%s", xs)
+	}
+
+	sNodes := []proto.NodeConfig{{
+		ID: 35, Core: "singbox", Protocol: "hysteria2", Port: 44443,
+		Settings: proto.NodeSettings{SNI: "jp.example.com"},
+		Users: []proto.NodeUser{
+			{Key: "n35.u1", Password: "p1"},
+			{Key: "n35.u1.r50", Password: "p2"},
+		},
+	}}
+	relays[0].UserKeys = []string{"n35.u1.r50"}
+	sb, err := RenderSingbox(sNodes, opt, relays...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ss := string(sb)
+	if !containsAll(ss, `"tag": "relay-n50"`, `"server": "192.3.173.122"`, `"auth_user"`, `"n35.u1.r50"`) {
+		t.Fatalf("sing-box relay missing expected entries:\n%s", ss)
 	}
 }
 

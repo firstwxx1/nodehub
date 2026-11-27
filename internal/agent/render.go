@@ -58,8 +58,9 @@ func certPaths(n proto.NodeConfig, opt RenderOptions) (string, string) {
 
 // ===================== Xray =====================
 
-func RenderXray(nodes []proto.NodeConfig, opt RenderOptions) ([]byte, error) {
+func RenderXray(nodes []proto.NodeConfig, opt RenderOptions, relays ...proto.RelayOutbound) ([]byte, error) {
 	inbounds := []any{}
+	presentUsers := map[string]bool{}
 	for _, n := range nodes {
 		if n.Core != "xray" || len(n.Users) == 0 {
 			continue
@@ -69,6 +70,9 @@ func RenderXray(nodes []proto.NodeConfig, opt RenderOptions) ([]byte, error) {
 			return nil, fmt.Errorf("node %d (%s): %w", n.ID, n.Name, err)
 		}
 		inbounds = append(inbounds, ib)
+		for _, u := range n.Users {
+			presentUsers[u.Key] = true
+		}
 	}
 	rules := []any{}
 	if opt.BlockBT {
@@ -76,6 +80,25 @@ func RenderXray(nodes []proto.NodeConfig, opt RenderOptions) ([]byte, error) {
 	}
 	if opt.BlockPrivate {
 		rules = append(rules, map[string]any{"type": "field", "ip": privateCIDRs, "outboundTag": "block"})
+	}
+	outbounds := []any{
+		map[string]any{"protocol": "freedom", "tag": "direct", "settings": map[string]any{"domainStrategy": xrayDomainStrategy(opt)}},
+		map[string]any{"protocol": "blackhole", "tag": "block"},
+	}
+	for _, r := range relays {
+		var matched []string
+		for _, k := range r.UserKeys {
+			if presentUsers[k] {
+				matched = append(matched, k)
+			}
+		}
+		if len(matched) == 0 {
+			continue
+		}
+		if ob := xrayRelayOutbound(r); ob != nil {
+			outbounds = append(outbounds, ob)
+			rules = append(rules, map[string]any{"type": "field", "user": matched, "outboundTag": r.Tag})
+		}
 	}
 	cfg := map[string]any{
 		"log":   map[string]any{"loglevel": "warning", "access": "none"},
@@ -85,14 +108,55 @@ func RenderXray(nodes []proto.NodeConfig, opt RenderOptions) ([]byte, error) {
 			"levels": map[string]any{"0": map[string]any{"statsUserUplink": true, "statsUserDownlink": true, "statsUserOnline": true, "handshake": 4, "connIdle": 300}},
 			"system": map[string]any{"statsInboundUplink": true, "statsInboundDownlink": true},
 		},
-		"inbounds": inbounds,
-		"outbounds": []any{
-			map[string]any{"protocol": "freedom", "tag": "direct", "settings": map[string]any{"domainStrategy": xrayDomainStrategy(opt)}},
-			map[string]any{"protocol": "blackhole", "tag": "block"},
-		},
-		"routing": map[string]any{"domainStrategy": "AsIs", "rules": rules},
+		"inbounds":  inbounds,
+		"outbounds": outbounds,
+		"routing":   map[string]any{"domainStrategy": "AsIs", "rules": rules},
 	}
 	return json.MarshalIndent(cfg, "", "  ")
+}
+
+func xrayRelayOutbound(r proto.RelayOutbound) map[string]any {
+	if r.Protocol != "vless" || r.Address == "" || r.Port <= 0 || r.UUID == "" {
+		return nil
+	}
+	network := orDefault(r.Network, "tcp")
+	if network == "raw" {
+		network = "tcp"
+	}
+	user := map[string]any{"id": r.UUID, "encryption": "none"}
+	if r.Flow != "" && network == "tcp" {
+		user["flow"] = r.Flow
+	}
+	ss := map[string]any{"network": network}
+	switch r.Security {
+	case "reality":
+		ss["security"] = "reality"
+		ss["realitySettings"] = map[string]any{
+			"serverName":  r.SNI,
+			"fingerprint": orDefault(r.Fingerprint, "chrome"),
+			"publicKey":   r.RealityPublicKey,
+			"shortId":     r.RealityShortID,
+		}
+	case "tls":
+		ss["security"] = "tls"
+		ss["tlsSettings"] = map[string]any{
+			"serverName":    r.SNI,
+			"fingerprint":   orDefault(r.Fingerprint, "chrome"),
+			"allowInsecure": r.Insecure,
+		}
+	}
+	return map[string]any{
+		"tag":      r.Tag,
+		"protocol": "vless",
+		"settings": map[string]any{
+			"vnext": []any{map[string]any{
+				"address": r.Address,
+				"port":    r.Port,
+				"users":   []any{user},
+			}},
+		},
+		"streamSettings": ss,
+	}
 }
 
 func xrayInbound(n proto.NodeConfig, opt RenderOptions) (map[string]any, error) {
@@ -198,9 +262,10 @@ func xrayInbound(n proto.NodeConfig, opt RenderOptions) (map[string]any, error) 
 
 // ===================== sing-box =====================
 
-func RenderSingbox(nodes []proto.NodeConfig, opt RenderOptions) ([]byte, error) {
+func RenderSingbox(nodes []proto.NodeConfig, opt RenderOptions, relays ...proto.RelayOutbound) ([]byte, error) {
 	inbounds := []any{}
 	var tags, users []string
+	presentUsers := map[string]bool{}
 	// Sniffing waits up to 300ms for the client's first bytes. A Hysteria2
 	// client sends nothing on a TCP stream until the server has answered its
 	// connect request, so sniffing those streams stalled every new connection
@@ -226,6 +291,7 @@ func RenderSingbox(nodes []proto.NodeConfig, opt RenderOptions) ([]byte, error) 
 		}
 		for _, u := range n.Users {
 			users = append(users, u.Key)
+			presentUsers[u.Key] = true
 		}
 	}
 	rules := []any{}
@@ -241,10 +307,26 @@ func RenderSingbox(nodes []proto.NodeConfig, opt RenderOptions) ([]byte, error) 
 	if opt.BlockPrivate {
 		rules = append(rules, map[string]any{"ip_is_private": true, "action": "reject"})
 	}
+	outbounds := []any{map[string]any{"type": "direct", "tag": "direct"}}
+	for _, r := range relays {
+		var matched []string
+		for _, k := range r.UserKeys {
+			if presentUsers[k] {
+				matched = append(matched, k)
+			}
+		}
+		if len(matched) == 0 {
+			continue
+		}
+		if ob := singboxRelayOutbound(r); ob != nil {
+			outbounds = append(outbounds, ob)
+			rules = append(rules, map[string]any{"auth_user": matched, "outbound": r.Tag})
+		}
+	}
 	cfg := map[string]any{
 		"log":       map[string]any{"level": "warn", "timestamp": true},
 		"inbounds":  inbounds,
-		"outbounds": []any{map[string]any{"type": "direct", "tag": "direct"}},
+		"outbounds": outbounds,
 		"dns":       map[string]any{"servers": []any{map[string]any{"type": "local", "tag": "local"}}},
 		"route":     map[string]any{"rules": rules, "final": "direct", "default_domain_resolver": map[string]any{"server": "local", "strategy": singboxStrategy(opt)}},
 		"experimental": map[string]any{
@@ -255,6 +337,40 @@ func RenderSingbox(nodes []proto.NodeConfig, opt RenderOptions) ([]byte, error) 
 		},
 	}
 	return json.MarshalIndent(cfg, "", "  ")
+}
+
+func singboxRelayOutbound(r proto.RelayOutbound) map[string]any {
+	if r.Protocol != "vless" || r.Address == "" || r.Port <= 0 || r.UUID == "" {
+		return nil
+	}
+	ob := map[string]any{
+		"type":        "vless",
+		"tag":         r.Tag,
+		"server":      r.Address,
+		"server_port": r.Port,
+		"uuid":        r.UUID,
+	}
+	network := orDefault(r.Network, "tcp")
+	if r.Flow != "" && (network == "tcp" || network == "raw") {
+		ob["flow"] = r.Flow
+	}
+	switch r.Security {
+	case "reality":
+		ob["tls"] = map[string]any{
+			"enabled":     true,
+			"server_name": r.SNI,
+			"utls":        map[string]any{"enabled": true, "fingerprint": orDefault(r.Fingerprint, "chrome")},
+			"reality":     map[string]any{"enabled": true, "public_key": r.RealityPublicKey, "short_id": r.RealityShortID},
+		}
+	case "tls":
+		ob["tls"] = map[string]any{
+			"enabled":     true,
+			"server_name": r.SNI,
+			"insecure":    r.Insecure,
+			"utls":        map[string]any{"enabled": true, "fingerprint": orDefault(r.Fingerprint, "chrome")},
+		}
+	}
+	return ob
 }
 
 func xrayDomainStrategy(opt RenderOptions) string {

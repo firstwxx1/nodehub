@@ -3,6 +3,7 @@ package master
 import (
 	"bytes"
 	"compress/gzip"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -850,5 +851,111 @@ func TestDownloadGzipAndChecksumCache(t *testing.T) {
 	}
 	if strings.Contains(string(instBody), "\r") || strings.Contains(string(instBody), "IGNORECASE") || strings.Contains(string(instBody), "version 2>/dev/null | head") {
 		t.Fatalf("install.sh must use LF endings, mawk-safe tolower(), and avoid pipefail SIGPIPE")
+	}
+}
+
+func TestServerSideSinglePortRelay(t *testing.T) {
+	if k, id, ok := parseUserKey("n39.u7.r50"); !ok || k != 'u' || id != 7 {
+		t.Fatalf("parseUserKey relay entry: got (%c, %d, %v)", k, id, ok)
+	}
+	if k, id, ok := parseUserKey("n50.r0"); !ok || k != 'r' || id != 0 {
+		t.Fatalf("parseUserKey relay landing: got (%c, %d, %v)", k, id, ok)
+	}
+
+	s, err := New(Options{DataDir: t.TempDir(), AdminPass: "test-pass-123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	jpSrvID, _ := s.st.CreateServer(&store.Server{Name: "阿里云日本", Region: "JP", Host: "8.211.171.207", PublicIPv4: "8.211.171.207", Enabled: true, TrafficResetDay: 1}, util.SHA256Hex(util.RandToken(24)))
+	usSrvID, _ := s.st.CreateServer(&store.Server{Name: "洛杉矶", Region: "US", Host: "192.3.173.122", PublicIPv4: "192.3.173.122", Enabled: true, TrafficResetDay: 1}, util.SHA256Hex(util.RandToken(24)))
+
+	jpNode := &store.Node{ServerID: jpSrvID, Name: "阿里云日本-TCP", Core: "xray", Protocol: "vless", Port: 44443, Enabled: true,
+		Settings: proto.NodeSettings{Network: "tcp", Security: "reality", Flow: "xtls-rprx-vision", RealityDest: "www.apple.com:443"}}
+	if err := s.normalizeNode(jpNode); err != nil {
+		t.Fatal(err)
+	}
+	jpNodeID, _ := s.st.CreateNode(jpNode)
+
+	usNode := &store.Node{ServerID: usSrvID, Name: "洛杉矶-TCP", Core: "xray", Protocol: "vless", Port: 44443, Enabled: true,
+		Settings: proto.NodeSettings{Network: "tcp", Security: "reality", Flow: "xtls-rprx-vision", RealityDest: "www.apple.com:443"}}
+	if err := s.normalizeNode(usNode); err != nil {
+		t.Fatal(err)
+	}
+	usNodeID, _ := s.st.CreateNode(usNode)
+
+	uname := "alice"
+	u, err := s.createUser(&UserInput{Username: &uname})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify agent configs on both entry (JP) and landing (US) servers
+	jpSrv, _ := s.st.GetServer(jpSrvID)
+	jpCfg, err := s.buildAgentConfig(jpSrv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jpCfg.Relays) != 1 || jpCfg.Relays[0].Address != "192.3.173.122" || jpCfg.Relays[0].Tag != fmt.Sprintf("relay-n%d", usNodeID) {
+		t.Fatalf("unexpected JP relays: %+v", jpCfg.Relays)
+	}
+	wantEntryUUID := relayEntryUUID(u.UUID, jpNodeID, usNodeID)
+	foundDerived := false
+	for _, nu := range jpCfg.Nodes[0].Users {
+		if nu.UUID == wantEntryUUID && nu.Key == relayEntryUserKey(jpNodeID, u.ID, usNodeID) {
+			foundDerived = true
+		}
+	}
+	if !foundDerived {
+		t.Fatalf("JP inbound missing derived relay user %s: %+v", wantEntryUUID, jpCfg.Nodes[0].Users)
+	}
+
+	usSrv, _ := s.st.GetServer(usSrvID)
+	usCfg, err := s.buildAgentConfig(usSrv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundLanding := false
+	for _, nu := range usCfg.Nodes[0].Users {
+		if nu.Key == relayLandingUserKey(usNodeID) && nu.UUID == jpCfg.Relays[0].UUID {
+			foundLanding = true
+		}
+	}
+	if !foundLanding {
+		t.Fatalf("US landing inbound missing relay service user: %+v", usCfg.Nodes[0].Users)
+	}
+
+	// Verify v2ray / NekoBox subscription emits standalone single-hop VLESS pointing to JP IP with derived UUID!
+	ts := httptest.NewServer(s.middleware(s.mux))
+	defer ts.Close()
+	resp, err := http.Get(ts.URL + "/sub/" + u.SubToken + "?target=v2ray")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b64, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	rawLinks, err := base64.StdEncoding.DecodeString(string(b64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	links := string(rawLinks)
+	if !strings.Contains(links, "vless://"+wantEntryUUID+"@8.211.171.207:44443") {
+		t.Fatalf("v2ray sub missing standalone server-relay link for LA:\n%s", links)
+	}
+
+	// Verify Clash subscription emits 🚀 中转·🇺🇸 洛杉矶 pointing to 8.211.171.207 WITHOUT dialer-proxy!
+	respC, err := http.Get(ts.URL + "/sub/" + u.SubToken + "?target=clash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	clashBody, _ := io.ReadAll(respC.Body)
+	respC.Body.Close()
+	cs := string(clashBody)
+	if !strings.Contains(cs, `"name":"🚀 中转·🇺🇸 洛杉矶"`) || !strings.Contains(cs, `"server":"8.211.171.207"`) || !strings.Contains(cs, `"uuid":"`+wantEntryUUID+`"`) {
+		t.Fatalf("clash sub missing server-side relayed LA:\n%s", cs)
+	}
+	for _, ln := range strings.Split(cs, "\n") {
+		if strings.Contains(ln, `"name":"🚀 中转·🇺🇸 洛杉矶"`) && strings.Contains(ln, `"dialer-proxy"`) {
+			t.Fatalf("server-side relayed Clash node must NOT carry dialer-proxy (breaks NekoBox): %s", ln)
+		}
 	}
 }

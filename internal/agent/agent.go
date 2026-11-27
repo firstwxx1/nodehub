@@ -365,9 +365,9 @@ func (a *Agent) applyLocked(cfg *proto.AgentConfig) error {
 		var data []byte
 		var err error
 		if name == "xray" {
-			data, err = RenderXray(nodes, opt)
+			data, err = RenderXray(nodes, opt, cfg.Relays...)
 		} else {
-			data, err = RenderSingbox(nodes, opt)
+			data, err = RenderSingbox(nodes, opt, cfg.Relays...)
 		}
 		if err != nil {
 			errs = append(errs, err.Error())

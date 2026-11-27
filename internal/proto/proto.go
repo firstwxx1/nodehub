@@ -2,7 +2,7 @@
 package proto
 
 // AgentVersion is bumped whenever the agent changes in a way the master cares about.
-const AgentVersion = "1.3.5"
+const AgentVersion = "1.3.6"
 
 // Heartbeat is sent by the agent every few seconds.
 type Heartbeat struct {
@@ -139,10 +139,31 @@ type NodeUser struct {
 	DeviceLimit int    `json:"device_limit,omitempty"`
 }
 
+// RelayOutbound configures a server-side single-port transit hop: inbound users listed in
+// UserKeys are routed directly to this upstream landing node (eliminating client-side
+// dialer-proxy compatibility issues and TCP-over-TCP nesting overhead).
+type RelayOutbound struct {
+	Tag              string   `json:"tag"`
+	Protocol         string   `json:"protocol"` // vless
+	Address          string   `json:"address"`
+	Port             int      `json:"port"`
+	UUID             string   `json:"uuid"`
+	Flow             string   `json:"flow,omitempty"`
+	Network          string   `json:"network,omitempty"`  // tcp
+	Security         string   `json:"security,omitempty"` // reality | tls | none
+	SNI              string   `json:"sni,omitempty"`
+	Fingerprint      string   `json:"fingerprint,omitempty"`
+	RealityPublicKey string   `json:"reality_public_key,omitempty"`
+	RealityShortID   string   `json:"reality_short_id,omitempty"`
+	Insecure         bool     `json:"insecure,omitempty"`
+	UserKeys         []string `json:"user_keys"`
+}
+
 // AgentConfig is returned by GET /agent/v1/config.
 type AgentConfig struct {
-	Version string       `json:"version"`
-	Nodes   []NodeConfig `json:"nodes"`
+	Version string          `json:"version"`
+	Nodes   []NodeConfig    `json:"nodes"`
+	Relays  []RelayOutbound `json:"relays,omitempty"`
 }
 
 // Report is posted periodically by the agent with traffic deltas and online IPs.

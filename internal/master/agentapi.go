@@ -52,9 +52,14 @@ func (s *Server) agentHeartbeat(w http.ResponseWriter, r *http.Request, srv *sto
 	}
 	hb.Ports = nil // not persisted in status_json
 	wasOnline := srv.Online
+	agentUpgraded := hb.AgentVersion != "" && hb.AgentVersion != srv.AgentVersion
 	if err := s.st.UpdateServerHeartbeat(srv.ID, &hb); err != nil {
 		writeErr(w, 500, err.Error())
 		return
+	}
+	if agentUpgraded {
+		srv.AgentVersion = hb.AgentVersion
+		s.bump()
 	}
 	if !wasOnline && srv.LastSeen > 0 {
 		s.emit("server.online", "info", fmt.Sprintf("服务器 %s 恢复在线", srv.Name), map[string]any{"server_id": srv.ID, "name": srv.Name})
@@ -138,6 +143,11 @@ func (s *Server) buildAgentConfig(srv *store.Server) (*proto.AgentConfig, error)
 	if err != nil {
 		return nil, err
 	}
+	plan := s.computeRelayPlan()
+	relayTargetsByNode := map[int64]relayTarget{}
+	for _, t := range plan.Targets {
+		relayTargetsByNode[t.Node.ID] = t
+	}
 	var users []*store.User
 	cfg := &proto.AgentConfig{Nodes: []proto.NodeConfig{}}
 	if srv.Enabled {
@@ -184,11 +194,48 @@ func (s *Server) buildAgentConfig(srv *store.Server) (*proto.AgentConfig, error)
 					}
 					nc.Users = append(nc.Users, proto.NodeUser{Key: userKeyLocal(n.ID, u.ID), UUID: u.UUID, Password: localUserPassword(n, u), SpeedLimit: sl, DeviceLimit: dl})
 				}
+				// Server-side relay entry: add per-user-per-target derived UUIDs on the entry node
+				// and attach corresponding upstream landing outbounds + routing rules.
+				if plan.EntryNode != nil && n.ID == plan.EntryNode.ID && len(plan.Targets) > 0 {
+					for _, t := range plan.Targets {
+						var ukeys []string
+						for _, u := range users {
+							if !nodeVisible(n, u) || !nodeVisible(t.Node, u) {
+								continue
+							}
+							sl, dl := u.SpeedLimit, u.DeviceLimit
+							if n.SpeedLimit > 0 && (sl == 0 || n.SpeedLimit < sl) {
+								sl = n.SpeedLimit
+							}
+							if n.DeviceLimit > 0 && (dl == 0 || n.DeviceLimit < dl) {
+								dl = n.DeviceLimit
+							}
+							key := relayEntryUserKey(n.ID, u.ID, t.Node.ID)
+							ru := relayEntryUUID(u.UUID, n.ID, t.Node.ID)
+							nc.Users = append(nc.Users, proto.NodeUser{Key: key, UUID: ru, Password: ru, SpeedLimit: sl, DeviceLimit: dl})
+							ukeys = append(ukeys, key)
+						}
+						if len(ukeys) > 0 {
+							ob := t.Outbound
+							ob.UserKeys = ukeys
+							cfg.Relays = append(cfg.Relays, ob)
+						}
+					}
+				}
+				// Server-side relay landing: allow the deterministic service UUID from the Asian entry node.
+				// Its key ("n<id>.r0") has kind 'r' so traffic is counted on the entry node without double-billing users.
+				if t, ok := relayTargetsByNode[n.ID]; ok {
+					nc.Users = append(nc.Users, proto.NodeUser{Key: relayLandingUserKey(n.ID), UUID: t.LandingID, Password: t.LandingID})
+				}
 			}
 			cfg.Nodes = append(cfg.Nodes, nc)
 		}
 	}
-	b, _ := json.Marshal(cfg.Nodes)
+	b, _ := json.Marshal(struct {
+		AgentVersion string                `json:"agent_version,omitempty"`
+		Nodes        []proto.NodeConfig    `json:"nodes"`
+		Relays       []proto.RelayOutbound `json:"relays,omitempty"`
+	}{srv.AgentVersion, cfg.Nodes, cfg.Relays})
 	h := sha256.Sum256(b)
 	cfg.Version = hex.EncodeToString(h[:8])
 	return cfg, nil
@@ -201,7 +248,11 @@ func parseUserKey(key string) (kind byte, id int64, ok bool) {
 	if i < 0 || i+2 > len(key) {
 		return 0, 0, false
 	}
-	id, err := strconv.ParseInt(key[i+2:], 10, 64)
+	rest := key[i+2:]
+	if dot := strings.IndexByte(rest, '.'); dot >= 0 {
+		rest = rest[:dot]
+	}
+	id, err := strconv.ParseInt(rest, 10, 64)
 	if err != nil {
 		return 0, 0, false
 	}
