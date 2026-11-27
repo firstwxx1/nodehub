@@ -869,6 +869,13 @@ func TestServerSideSinglePortRelay(t *testing.T) {
 	jpSrvID, _ := s.st.CreateServer(&store.Server{Name: "阿里云日本", Region: "JP", Host: "8.211.171.207", PublicIPv4: "8.211.171.207", Enabled: true, TrafficResetDay: 1}, util.SHA256Hex(util.RandToken(24)))
 	usSrvID, _ := s.st.CreateServer(&store.Server{Name: "洛杉矶", Region: "US", Host: "192.3.173.122", PublicIPv4: "192.3.173.122", Enabled: true, TrafficResetDay: 1}, util.SHA256Hex(util.RandToken(24)))
 
+	jpHy2 := &store.Node{ServerID: jpSrvID, Name: "阿里云日本", Core: "singbox", Protocol: "hysteria2", Port: 44443, Enabled: true,
+		Settings: proto.NodeSettings{SNI: "www.bing.com", CertMode: "self", Obfs: "salamander", ObfsPassword: "obfsp", HopPorts: "20000-40000"}}
+	if err := s.normalizeNode(jpHy2); err != nil {
+		t.Fatal(err)
+	}
+	jpHy2ID, _ := s.st.CreateNode(jpHy2)
+
 	jpNode := &store.Node{ServerID: jpSrvID, Name: "阿里云日本-TCP", Core: "xray", Protocol: "vless", Port: 44443, Enabled: true,
 		Settings: proto.NodeSettings{Network: "tcp", Security: "reality", Flow: "xtls-rprx-vision", RealityDest: "www.apple.com:443"}}
 	if err := s.normalizeNode(jpNode); err != nil {
@@ -889,24 +896,30 @@ func TestServerSideSinglePortRelay(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Verify agent configs on both entry (JP) and landing (US) servers
+	// Verify agent configs on both entry (JP dual-stack Hy2 + VLESS) and landing (US) servers
 	jpSrv, _ := s.st.GetServer(jpSrvID)
 	jpCfg, err := s.buildAgentConfig(jpSrv)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(jpCfg.Relays) != 1 || jpCfg.Relays[0].Address != "192.3.173.122" || jpCfg.Relays[0].Tag != fmt.Sprintf("relay-n%d", usNodeID) {
-		t.Fatalf("unexpected JP relays: %+v", jpCfg.Relays)
+	if len(jpCfg.Relays) != 1 || jpCfg.Relays[0].Address != "192.3.173.122" || jpCfg.Relays[0].Tag != fmt.Sprintf("relay-n%d", usNodeID) || len(jpCfg.Relays[0].UserKeys) != 2 {
+		t.Fatalf("unexpected JP merged relays: %+v", jpCfg.Relays)
 	}
+	wantEntryPw := relayEntryPassword(u.UUID, jpHy2ID, usNodeID)
 	wantEntryUUID := relayEntryUUID(u.UUID, jpNodeID, usNodeID)
-	foundDerived := false
-	for _, nu := range jpCfg.Nodes[0].Users {
-		if nu.UUID == wantEntryUUID && nu.Key == relayEntryUserKey(jpNodeID, u.ID, usNodeID) {
-			foundDerived = true
+	foundHy2, foundTCP := false, false
+	for _, nc := range jpCfg.Nodes {
+		for _, nu := range nc.Users {
+			if nc.ID == jpHy2ID && nu.Password == wantEntryPw && nu.Key == relayEntryUserKey(jpHy2ID, u.ID, usNodeID) {
+				foundHy2 = true
+			}
+			if nc.ID == jpNodeID && nu.UUID == wantEntryUUID && nu.Key == relayEntryUserKey(jpNodeID, u.ID, usNodeID) {
+				foundTCP = true
+			}
 		}
 	}
-	if !foundDerived {
-		t.Fatalf("JP inbound missing derived relay user %s: %+v", wantEntryUUID, jpCfg.Nodes[0].Users)
+	if !foundHy2 || !foundTCP {
+		t.Fatalf("JP inbound missing derived relay users (hy2=%v tcp=%v): %+v", foundHy2, foundTCP, jpCfg.Nodes)
 	}
 
 	usSrv, _ := s.st.GetServer(usSrvID)
@@ -924,7 +937,7 @@ func TestServerSideSinglePortRelay(t *testing.T) {
 		t.Fatalf("US landing inbound missing relay service user: %+v", usCfg.Nodes[0].Users)
 	}
 
-	// Verify v2ray / NekoBox subscription emits standalone single-hop VLESS pointing to JP IP with derived UUID!
+	// Verify v2ray / NekoBox subscription emits BOTH Hy2 (primary) and VLESS-TCP (backup) single-hop links pointing to JP!
 	ts := httptest.NewServer(s.middleware(s.mux))
 	defer ts.Close()
 	resp, err := http.Get(ts.URL + "/sub/" + u.SubToken + "?target=v2ray")
@@ -938,11 +951,11 @@ func TestServerSideSinglePortRelay(t *testing.T) {
 		t.Fatal(err)
 	}
 	links := string(rawLinks)
-	if !strings.Contains(links, "vless://"+wantEntryUUID+"@8.211.171.207:44443") {
-		t.Fatalf("v2ray sub missing standalone server-relay link for LA:\n%s", links)
+	if !strings.Contains(links, "hysteria2://"+wantEntryPw+"@8.211.171.207:44443") || !strings.Contains(links, "vless://"+wantEntryUUID+"@8.211.171.207:44443") {
+		t.Fatalf("v2ray sub missing dual-stack server-relay links for LA:\n%s", links)
 	}
 
-	// Verify Clash subscription emits 🚀 中转·🇺🇸 洛杉矶 pointing to 8.211.171.207 WITHOUT dialer-proxy!
+	// Verify Clash subscription emits 🚀 中转·🇺🇸 洛杉矶 (hysteria2) & 🚀 中转·🇺🇸 洛杉矶-TCP (vless) WITHOUT dialer-proxy!
 	respC, err := http.Get(ts.URL + "/sub/" + u.SubToken + "?target=clash")
 	if err != nil {
 		t.Fatal(err)
@@ -950,12 +963,19 @@ func TestServerSideSinglePortRelay(t *testing.T) {
 	clashBody, _ := io.ReadAll(respC.Body)
 	respC.Body.Close()
 	cs := string(clashBody)
-	if !strings.Contains(cs, `"name":"🚀 中转·🇺🇸 洛杉矶"`) || !strings.Contains(cs, `"server":"8.211.171.207"`) || !strings.Contains(cs, `"uuid":"`+wantEntryUUID+`"`) {
-		t.Fatalf("clash sub missing server-side relayed LA:\n%s", cs)
+	for _, want := range []string{
+		`"name":"🚀 中转·🇺🇸 洛杉矶"`,
+		`"name":"🚀 中转·🇺🇸 洛杉矶-TCP"`,
+		`"password":"` + wantEntryPw + `"`,
+		`"uuid":"` + wantEntryUUID + `"`,
+	} {
+		if !strings.Contains(cs, want) {
+			t.Fatalf("clash sub missing %s:\n%s", want, cs)
+		}
 	}
 	for _, ln := range strings.Split(cs, "\n") {
-		if strings.Contains(ln, `"name":"🚀 中转·🇺🇸 洛杉矶"`) && strings.Contains(ln, `"dialer-proxy"`) {
-			t.Fatalf("server-side relayed Clash node must NOT carry dialer-proxy (breaks NekoBox): %s", ln)
+		if strings.Contains(ln, `"name":"🚀 中转·🇺🇸 洛杉矶`) && strings.Contains(ln, `"dialer-proxy"`) {
+			t.Fatalf("server-side relayed Clash node must NOT carry dialer-proxy: %s", ln)
 		}
 	}
 }

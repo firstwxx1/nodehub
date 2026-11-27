@@ -2,6 +2,7 @@ package master
 
 import (
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"sort"
@@ -44,12 +45,28 @@ func relayEntryUUID(userUUID string, entryNodeID, targetNodeID int64) string {
 	)
 }
 
+// relayEntryPassword derives a URL-safe 32-hex-char password for Hysteria2 server-side relay entries.
+func relayEntryPassword(userUUID string, entryNodeID, targetNodeID int64) string {
+	h := sha256.Sum256([]byte(strings.Join([]string{
+		"nh-relay-hy2-v1",
+		userUUID,
+		strconv.FormatInt(entryNodeID, 10),
+		strconv.FormatInt(targetNodeID, 10),
+	}, "|")))
+	return hex.EncodeToString(h[:16])
+}
+
 func relayEntryUserKey(entryNodeID, userID, targetNodeID int64) string {
 	return fmt.Sprintf("n%d.u%d.r%d", entryNodeID, userID, targetNodeID)
 }
 
 func relayLandingUserKey(targetNodeID int64) string {
 	return fmt.Sprintf("n%d.r0", targetNodeID)
+}
+
+type relayEntry struct {
+	Node *store.Node
+	Addr string
 }
 
 type relayTarget struct {
@@ -63,8 +80,7 @@ type relayTarget struct {
 
 type relayPlan struct {
 	EntryServer *store.Server
-	EntryNode   *store.Node
-	EntryAddr   string
+	Entries     []relayEntry // ordered: sing-box Hysteria2 first (fastest), Xray VLESS-Reality TCP second (fallback)
 	EntryReady  bool
 	Targets     []relayTarget
 }
@@ -106,6 +122,10 @@ func isRelayCapableVLESS(n *store.Node) bool {
 	return n.Settings.Security == "reality" || n.Settings.Security == "tls"
 }
 
+func isRelayCapableHy2(n *store.Node) bool {
+	return n.Enabled && n.Source == "local" && n.Core == "singbox" && n.Protocol == "hysteria2"
+}
+
 func relayTargetSNI(n *store.Node) string {
 	st := n.Settings
 	if st.Security == "reality" {
@@ -133,8 +153,9 @@ func serverSupportsRelay(srv *store.Server) bool {
 	return true
 }
 
-// computeRelayPlan selects one Asia entry server (with an enabled Xray VLESS-Reality/TLS node)
-// and all US/EU VLESS-Reality/TLS landing nodes to build zero-extra-port server-side transit relays.
+// computeRelayPlan selects one Asia entry server (collecting its sing-box Hysteria2 and/or
+// Xray VLESS-Reality entry nodes) and all US/EU VLESS-Reality/TLS landing nodes to build
+// zero-extra-port dual-stack server-side transit relays.
 func (s *Server) computeRelayPlan() relayPlan {
 	mode := strings.ToLower(strings.TrimSpace(s.st.SettingOr("sub_relay_mode", "auto")))
 	if mode == "off" || mode == "0" || mode == "false" || mode == "client" {
@@ -167,7 +188,8 @@ func (s *Server) computeRelayPlan() relayPlan {
 
 	type entryCand struct {
 		srv   *store.Server
-		node  *store.Node
+		hy2   *store.Node
+		vless *store.Node
 		rk    string
 		ready bool
 	}
@@ -185,16 +207,19 @@ func (s *Server) computeRelayPlan() relayPlan {
 		}
 		snodes := nodesBySrv[srv.ID]
 		rk, cc := s.serverRegionKey(srv, snodes, checks)
-		var bestEntry *store.Node
+		var bestHy2, bestVLESS *store.Node
 		for _, n := range snodes {
+			if bestHy2 == nil && isRelayCapableHy2(n) {
+				bestHy2 = n
+			}
 			if isRelayCapableVLESS(n) {
-				if bestEntry == nil || (bestEntry.Core != "xray" && n.Core == "xray") {
-					bestEntry = n
+				if bestVLESS == nil || (bestVLESS.Core != "xray" && n.Core == "xray") {
+					bestVLESS = n
 				}
 			}
 		}
-		if bestEntry != nil && (isAsiaRelayRegion(rk) || (preferredEntryID > 0 && srv.ID == preferredEntryID)) {
-			entries = append(entries, entryCand{srv: srv, node: bestEntry, rk: rk, ready: serverSupportsRelay(srv)})
+		if (bestHy2 != nil || bestVLESS != nil) && (isAsiaRelayRegion(rk) || (preferredEntryID > 0 && srv.ID == preferredEntryID)) {
+			entries = append(entries, entryCand{srv: srv, hy2: bestHy2, vless: bestVLESS, rk: rk, ready: serverSupportsRelay(srv)})
 		}
 		if isRelayTargetRegion(rk) {
 			targetsMeta = append(targetsMeta, srvMeta{srv: srv, rk: rk, cc: cc})
@@ -204,7 +229,6 @@ func (s *Server) computeRelayPlan() relayPlan {
 		return relayPlan{}
 	}
 
-	// Pick entry server: explicit setting first, then ready+online, then JP/HK/TW/SG/KR, then lowest ID.
 	regionRank := map[string]int{"JP": 1, "HK": 2, "TW": 3, "SG": 4, "KR": 5}
 	sort.SliceStable(entries, func(i, j int) bool {
 		a, b := entries[i], entries[j]
@@ -213,6 +237,9 @@ func (s *Server) computeRelayPlan() relayPlan {
 		}
 		if a.ready != b.ready {
 			return a.ready
+		}
+		if (a.hy2 != nil) != (b.hy2 != nil) {
+			return a.hy2 != nil
 		}
 		if a.srv.Online != b.srv.Online {
 			return a.srv.Online
@@ -233,9 +260,20 @@ func (s *Server) computeRelayPlan() relayPlan {
 
 	plan := relayPlan{
 		EntryServer: chosen.srv,
-		EntryNode:   chosen.node,
-		EntryAddr:   s.connectAddr(chosen.node, chosen.srv),
 		EntryReady:  chosen.ready,
+	}
+	if chosen.hy2 != nil {
+		if addr := s.connectAddr(chosen.hy2, chosen.srv); addr != "" {
+			plan.Entries = append(plan.Entries, relayEntry{Node: chosen.hy2, Addr: addr})
+		}
+	}
+	if chosen.vless != nil {
+		if addr := s.connectAddr(chosen.vless, chosen.srv); addr != "" {
+			plan.Entries = append(plan.Entries, relayEntry{Node: chosen.vless, Addr: addr})
+		}
+	}
+	if len(plan.Entries) == 0 {
+		return relayPlan{}
 	}
 
 	sort.SliceStable(targetsMeta, func(i, j int) bool { return targetsMeta[i].srv.ID < targetsMeta[j].srv.ID })

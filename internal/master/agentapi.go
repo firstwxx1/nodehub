@@ -144,10 +144,15 @@ func (s *Server) buildAgentConfig(srv *store.Server) (*proto.AgentConfig, error)
 		return nil, err
 	}
 	plan := s.computeRelayPlan()
+	entryNodeSet := map[int64]bool{}
+	for _, en := range plan.Entries {
+		entryNodeSet[en.Node.ID] = true
+	}
 	relayTargetsByNode := map[int64]relayTarget{}
 	for _, t := range plan.Targets {
 		relayTargetsByNode[t.Node.ID] = t
 	}
+	relayKeysByTarget := map[int64][]string{}
 	var users []*store.User
 	cfg := &proto.AgentConfig{Nodes: []proto.NodeConfig{}}
 	if srv.Enabled {
@@ -194,11 +199,10 @@ func (s *Server) buildAgentConfig(srv *store.Server) (*proto.AgentConfig, error)
 					}
 					nc.Users = append(nc.Users, proto.NodeUser{Key: userKeyLocal(n.ID, u.ID), UUID: u.UUID, Password: localUserPassword(n, u), SpeedLimit: sl, DeviceLimit: dl})
 				}
-				// Server-side relay entry: add per-user-per-target derived UUIDs on the entry node
-				// and attach corresponding upstream landing outbounds + routing rules.
-				if plan.EntryNode != nil && n.ID == plan.EntryNode.ID && len(plan.Targets) > 0 {
+				// Server-side relay entry (supports sing-box Hysteria2 and/or Xray VLESS-Reality):
+				// add per-user-per-target derived credentials and collect keys for merged RelayOutbounds.
+				if entryNodeSet[n.ID] && len(plan.Targets) > 0 {
 					for _, t := range plan.Targets {
-						var ukeys []string
 						for _, u := range users {
 							if !nodeVisible(n, u) || !nodeVisible(t.Node, u) {
 								continue
@@ -211,14 +215,14 @@ func (s *Server) buildAgentConfig(srv *store.Server) (*proto.AgentConfig, error)
 								dl = n.DeviceLimit
 							}
 							key := relayEntryUserKey(n.ID, u.ID, t.Node.ID)
-							ru := relayEntryUUID(u.UUID, n.ID, t.Node.ID)
-							nc.Users = append(nc.Users, proto.NodeUser{Key: key, UUID: ru, Password: ru, SpeedLimit: sl, DeviceLimit: dl})
-							ukeys = append(ukeys, key)
-						}
-						if len(ukeys) > 0 {
-							ob := t.Outbound
-							ob.UserKeys = ukeys
-							cfg.Relays = append(cfg.Relays, ob)
+							if n.Protocol == "hysteria2" {
+								pw := relayEntryPassword(u.UUID, n.ID, t.Node.ID)
+								nc.Users = append(nc.Users, proto.NodeUser{Key: key, UUID: u.UUID, Password: pw, SpeedLimit: sl, DeviceLimit: dl})
+							} else {
+								ru := relayEntryUUID(u.UUID, n.ID, t.Node.ID)
+								nc.Users = append(nc.Users, proto.NodeUser{Key: key, UUID: ru, Password: ru, SpeedLimit: sl, DeviceLimit: dl})
+							}
+							relayKeysByTarget[t.Node.ID] = append(relayKeysByTarget[t.Node.ID], key)
 						}
 					}
 				}
@@ -229,6 +233,13 @@ func (s *Server) buildAgentConfig(srv *store.Server) (*proto.AgentConfig, error)
 				}
 			}
 			cfg.Nodes = append(cfg.Nodes, nc)
+		}
+		for _, t := range plan.Targets {
+			if ukeys := relayKeysByTarget[t.Node.ID]; len(ukeys) > 0 {
+				ob := t.Outbound
+				ob.UserKeys = ukeys
+				cfg.Relays = append(cfg.Relays, ob)
+			}
 		}
 	}
 	b, _ := json.Marshal(struct {

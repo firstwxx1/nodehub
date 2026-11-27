@@ -32,8 +32,9 @@ type subNode struct {
 	DialerProxy string
 	// true for auto-generated Asia->US/EU relay variants (either server-side or client-side)
 	IsRelay bool
-	// optional per-node UUID override used by server-side single-port relay entries
-	OverrideUUID string
+	// optional per-node UUID / password overrides used by server-side single-port relay entries
+	OverrideUUID     string
+	OverridePassword string
 	// landing server ID covered by a server-side relay entry (prevents duplicate client-side relays)
 	RelayTargetServerID int64
 }
@@ -525,45 +526,61 @@ func buildAutoRelays(directNodes []subNode, relayGroup string) (asiaRelays []str
 
 func (s *Server) serverRelaySubNodes(u *store.User, existing []subNode) []subNode {
 	plan := s.computeRelayPlan()
-	if plan.EntryNode == nil || !plan.EntryReady || len(plan.Targets) == 0 {
-		return nil
-	}
-	if !nodeVisible(plan.EntryNode, u) {
+	if len(plan.Entries) == 0 || !plan.EntryReady || len(plan.Targets) == 0 {
 		return nil
 	}
 	tpl := s.st.SettingOr("sub_name_template", "{flag} {name}")
+	upM, _ := strconv.Atoi(s.st.Setting("sub_hy2_up_mbps"))
+	downM, _ := strconv.Atoi(s.st.Setting("sub_hy2_down_mbps"))
 	existingNames := map[string]bool{}
 	for _, sn := range existing {
 		existingNames[sn.Name] = true
 	}
+	dualEntry := len(plan.Entries) > 1
 	var out []subNode
-	for _, t := range plan.Targets {
-		if !nodeVisible(t.Node, u) {
+	for _, entry := range plan.Entries {
+		if !nodeVisible(entry.Node, u) {
 			continue
 		}
-		base := strings.NewReplacer("{flag}", flagEmoji(t.Country), "{name}", t.Node.Name, "{region}", t.Server.Region, "{protocol}", t.Node.Protocol,
-			"{rate}", strconv.FormatFloat(t.Node.Rate, 'f', -1, 64)).Replace(tpl)
-		name := relayDisplayName(strings.TrimSpace(base))
-		if existingNames[name] {
-			for i := 2; ; i++ {
-				cand := fmt.Sprintf("%s %d", name, i)
-				if !existingNames[cand] {
-					name = cand
-					break
+		for _, t := range plan.Targets {
+			if !nodeVisible(t.Node, u) {
+				continue
+			}
+			base := strings.NewReplacer("{flag}", flagEmoji(t.Country), "{name}", t.Node.Name, "{region}", t.Server.Region, "{protocol}", t.Node.Protocol,
+				"{rate}", strconv.FormatFloat(t.Node.Rate, 'f', -1, 64)).Replace(tpl)
+			name := relayDisplayName(strings.TrimSpace(base))
+			if dualEntry && entry.Node.Protocol != "hysteria2" {
+				name += "-TCP"
+			}
+			if existingNames[name] {
+				for i := 2; ; i++ {
+					cand := fmt.Sprintf("%s %d", name, i)
+					if !existingNames[cand] {
+						name = cand
+						break
+					}
 				}
 			}
+			existingNames[name] = true
+			entryCopy := *entry.Node
+			sn := subNode{
+				Node:                &entryCopy,
+				Name:                name,
+				Addr:                entry.Addr,
+				Country:             t.Country,
+				IsRelay:             true,
+				RelayTargetServerID: t.Server.ID,
+			}
+			if entry.Node.Protocol == "hysteria2" {
+				sn.OverridePassword = relayEntryPassword(u.UUID, entry.Node.ID, t.Node.ID)
+				if upM > 0 && downM > 0 {
+					sn.UpMbps, sn.DownMbps = upM, downM
+				}
+			} else {
+				sn.OverrideUUID = relayEntryUUID(u.UUID, entry.Node.ID, t.Node.ID)
+			}
+			out = append(out, sn)
 		}
-		existingNames[name] = true
-		entryCopy := *plan.EntryNode
-		out = append(out, subNode{
-			Node:                &entryCopy,
-			Name:                name,
-			Addr:                plan.EntryAddr,
-			Country:             t.Country,
-			OverrideUUID:        relayEntryUUID(u.UUID, plan.EntryNode.ID, t.Node.ID),
-			IsRelay:             true,
-			RelayTargetServerID: t.Server.ID,
-		})
 	}
 	return out
 }
@@ -1346,15 +1363,20 @@ func renderSurge(nodes []subNode, u *store.User, selfURL string, smart, relay bo
 	var sb strings.Builder
 	sb.WriteString("#!MANAGED-CONFIG " + selfURL + " interval=43200 strict=false\n\n[General]\nloglevel = notify\nskip-proxy = 127.0.0.1, 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12, localhost, *.local\n\n[Proxy]\n")
 	var validNodes []subNode
-	var names []string
+	var names, relayNames []string
 	for _, sn := range nodes {
 		if l := surgeLine(sn, u); l != "" {
 			sb.WriteString(l + "\n")
 			validNodes = append(validNodes, sn)
-			names = append(names, strings.ReplaceAll(sn.Name, ",", " "))
+			clean := strings.ReplaceAll(sn.Name, ",", " ")
+			names = append(names, clean)
+			if sn.IsRelay {
+				relayNames = append(relayNames, clean)
+			}
 		}
 	}
-	var asiaRelays, relayNames []string
+	var asiaRelays []string
+	var clientRelayed int
 	if relay {
 		var relayedNodes []subNode
 		rawAsia, relayedNodes := buildAutoRelays(validNodes, asiaRelayGroupName)
@@ -1367,19 +1389,23 @@ func renderSurge(nodes []subNode, u *store.User, selfURL string, smart, relay bo
 				clean := strings.ReplaceAll(rn.Name, ",", " ")
 				names = append(names, clean)
 				relayNames = append(relayNames, clean)
+				clientRelayed++
 			}
 		}
 	}
 	if len(names) == 0 {
 		names = []string{"DIRECT"}
 	}
-	hasRelay := len(relayNames) > 0 && len(asiaRelays) > 0
+	hasRelay := len(relayNames) > 0
+	hasClientRelay := clientRelayed > 0 && len(asiaRelays) > 0
 	sb.WriteString("\n[Proxy Group]\n")
 	if hasRelay {
 		sb.WriteString("Proxy = select, Auto, " + usEuRelayGroupName + ", " + strings.Join(names, ", ") + "\n")
 		sb.WriteString("Auto = url-test, " + strings.Join(names, ", ") + ", url=http://www.gstatic.com/generate_204, interval=300\n")
 		sb.WriteString(usEuRelayGroupName + " = url-test, " + strings.Join(relayNames, ", ") + ", url=http://www.gstatic.com/generate_204, interval=180\n")
-		sb.WriteString(asiaRelayGroupName + " = url-test, " + strings.Join(asiaRelays, ", ") + ", url=http://www.gstatic.com/generate_204, interval=180\n")
+		if hasClientRelay {
+			sb.WriteString(asiaRelayGroupName + " = url-test, " + strings.Join(asiaRelays, ", ") + ", url=http://www.gstatic.com/generate_204, interval=180\n")
+		}
 	} else {
 		sb.WriteString("Proxy = select, Auto, " + strings.Join(names, ", ") + "\n")
 		sb.WriteString("Auto = url-test, " + strings.Join(names, ", ") + ", url=http://www.gstatic.com/generate_204, interval=300\n")
@@ -1498,9 +1524,13 @@ func (s *Server) handleSubInfo(w http.ResponseWriter, r *http.Request) {
 		"remaining": v.Remaining, "expire_days": v.ExpireDays, "nodes": list, "updated_at": time.Now().Unix()})
 }
 
-// pw is the credential written into the subscription: script nodes (hysteria2-installer) authenticate every
-// client with the owner password of that script, other nodes use the user's own password.
+// pw is the credential written into the subscription: server-side relay overrides take precedence,
+// script nodes (hysteria2-installer) authenticate every client with the owner password of that script,
+// and other nodes use the user's own password.
 func (sn subNode) pw(u *store.User) string {
+	if sn.OverridePassword != "" {
+		return sn.OverridePassword
+	}
 	if sn.Node.Core == "script" && sn.Node.Settings.SharedPassword != "" && !sn.Node.Settings.PortalUsers {
 		return sn.Node.Settings.SharedPassword
 	}
