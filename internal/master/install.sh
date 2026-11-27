@@ -1,24 +1,29 @@
 #!/usr/bin/env bash
-# NodeHub agent installer
-# usage: curl -fsSL __MASTER_URL__/install.sh | bash -s -- --master __MASTER_URL__ --token <TOKEN> [--insecure] [--no-xray] [--no-singbox]
+# NodeHub agent installer (parallel compressed downloads + version skip + concurrent kernel tuning)
+# usage: curl -fsSL __MASTER_URL__/install.sh | bash -s -- --master __MASTER_URL__ --token <TOKEN> [--insecure] [--no-xray] [--no-singbox] [--fast] [--force]
 set -euo pipefail
 
+T_START=$(date +%s)
 MASTER="__MASTER_URL__"
 TOKEN=""
 INSECURE=0
 WITH_XRAY=1
 WITH_SINGBOX=1
+FAST=0
+FORCE=0
 XRAY_VERSION="${XRAY_VERSION:-v25.10.15}"
 SINGBOX_VERSION="${SINGBOX_VERSION:-1.12.12}"
 GH="${GH_PROXY:-}"   # optional mirror prefix, e.g. https://ghfast.top/
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --master) MASTER="$2"; shift 2 ;;
+    --master) MASTER="${2%/}"; shift 2 ;;
     --token) TOKEN="$2"; shift 2 ;;
     --insecure) INSECURE=1; shift ;;
     --no-xray) WITH_XRAY=0; shift ;;
     --no-singbox) WITH_SINGBOX=0; shift ;;
+    --fast) FAST=1; shift ;;
+    --force) FORCE=1; shift ;;
     --uninstall)
       systemctl disable --now nodehub-agent 2>/dev/null || true
       rm -f /etc/systemd/system/nodehub-agent.service
@@ -39,68 +44,126 @@ case "$(uname -m)" in
 esac
 
 need() { command -v "$1" >/dev/null 2>&1; }
-if ! need curl || ! need unzip || ! need tar; then
-  if need apt-get; then apt-get update -y && apt-get install -y curl unzip tar ca-certificates
-  elif need dnf; then dnf install -y curl unzip tar ca-certificates
-  elif need yum; then yum install -y curl unzip tar ca-certificates
-  elif need apk; then apk add --no-cache curl unzip tar ca-certificates bash
+
+pkg_install() {
+  if need apt-get; then apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$@" >/dev/null
+  elif need dnf; then dnf install -y -q "$@" >/dev/null
+  elif need yum; then yum install -y -q "$@" >/dev/null
+  elif need apk; then apk add --no-cache -q "$@" >/dev/null
   fi
+}
+
+# Only invoke package manager if curl is actually missing (avoid 15-30s apt-get update just for unzip)
+if ! need curl; then
+  pkg_install curl ca-certificates
 fi
 
-CURL="curl -fsSL --retry 3"
-[ "$INSECURE" = 1 ] && CURL="$CURL -k"
+CURL="curl -fsSL --compressed --connect-timeout 8 --retry 2 --retry-delay 1"
+CURL_HEAD="curl -fsSI --connect-timeout 5 --max-time 8"
+if [ "$INSECURE" = 1 ]; then
+  CURL="$CURL -k"
+  CURL_HEAD="$CURL_HEAD -k"
+fi
 
 BIN=/usr/local/nodehub
 mkdir -p "$BIN" /etc/nodehub
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 
-echo "==> downloading agent ($ARCH)"
-$CURL -D "$TMP/agent.hdr" -o "$TMP/agent" "$MASTER/dl/agent?arch=$ARCH"
-WANT_SHA="$(awk 'BEGIN{IGNORECASE=1}/^X-Checksum-Sha256:/{gsub(/\r/,""); print $2; exit}' "$TMP/agent.hdr" 2>/dev/null || true)"
-if [ -n "$WANT_SHA" ] && need sha256sum; then
-  GOT_SHA="$(sha256sum "$TMP/agent" | awk '{print $1}')"
-  if [ "$GOT_SHA" != "$WANT_SHA" ]; then
-    echo "checksum mismatch for nodehub-agent (want $WANT_SHA, got $GOT_SHA)" >&2
-    exit 1
+verify_sha() {
+  local file="$1" hdr="$2" label="$3"
+  local want got
+  want="$(awk 'BEGIN{IGNORECASE=1}/^X-Checksum-Sha256:/{gsub(/\r/,""); print $2; exit}' "$hdr" 2>/dev/null || true)"
+  if [ -n "$want" ] && need sha256sum; then
+    got="$(sha256sum "$file" | awk '{print $1}')"
+    if [ "$got" != "$want" ]; then
+      echo "checksum mismatch for $label (want $want, got $got)" >&2
+      return 1
+    fi
   fi
-fi
-chmod 755 "$TMP/agent"
-# stage on same filesystem before atomic rename so live upgrades never hit ETXTBSY across tmpfs
-cp -f "$TMP/agent" "$BIN/nodehub-agent.new"
-chmod 755 "$BIN/nodehub-agent.new"
-mv -f "$BIN/nodehub-agent.new" "$BIN/nodehub-agent"
+}
 
-if [ "$WITH_XRAY" = 1 ]; then
-  echo "==> installing Xray $XRAY_VERSION"
-  $CURL -o "$TMP/xray.zip" "${GH}https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-linux-${XARCH}.zip"
-  unzip -oq "$TMP/xray.zip" -d "$TMP/xray"
-  cp -f "$TMP/xray/xray" "$BIN/xray.new"
-  chmod 755 "$BIN/xray.new"
-  mv -f "$BIN/xray.new" "$BIN/xray"
-  cp -f "$TMP/xray/geoip.dat" "$TMP/xray/geosite.dat" "$BIN/" 2>/dev/null || true
-fi
+atomic_install() {
+  local src="$1" dst="$2"
+  # stage on same filesystem before atomic rename so live upgrades never hit ETXTBSY across tmpfs
+  cp -f "$src" "${dst}.new"
+  chmod 755 "${dst}.new"
+  mv -f "${dst}.new" "$dst"
+}
 
-if [ "$WITH_SINGBOX" = 1 ]; then
-  echo "==> installing sing-box $SINGBOX_VERSION"
-  # prefer the build served by the master (compiled with v2ray_api for per-user traffic stats)
-  if $CURL -o "$TMP/sing-box" "$MASTER/dl/sing-box-linux-$ARCH" 2>/dev/null; then
-    cp -f "$TMP/sing-box" "$BIN/sing-box.new"
-    chmod 755 "$BIN/sing-box.new"
-    mv -f "$BIN/sing-box.new" "$BIN/sing-box"
+extract_zip_member() {
+  local zip="$1" member="$2" dest="$3"
+  if need unzip; then
+    unzip -p "$zip" "$member" > "$dest"
+  elif need python3; then
+    python3 -c 'import zipfile,sys; open(sys.argv[3],"wb").write(zipfile.ZipFile(sys.argv[1]).read(sys.argv[2]))' "$zip" "$member" "$dest"
+  elif need bsdtar; then
+    bsdtar -xOf "$zip" "$member" > "$dest"
   else
-    echo "    master has no sing-box build, falling back to the official release (no per-user stats for sing-box nodes)"
-    $CURL -o "$TMP/sb.tgz" "${GH}https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-${ARCH}.tar.gz"
-    tar xzf "$TMP/sb.tgz" -C "$TMP"
-    cp -f "$TMP"/sing-box-*/sing-box "$BIN/sing-box.new"
-    chmod 755 "$BIN/sing-box.new"
-    mv -f "$BIN/sing-box.new" "$BIN/sing-box"
+    pkg_install unzip
+    unzip -p "$zip" "$member" > "$dest"
   fi
-fi
+}
 
-ARGS="-config /etc/nodehub/agent.json -master $MASTER -token $TOKEN"
-[ "$INSECURE" = 1 ] && ARGS="$ARGS -insecure"
-"$BIN/nodehub-agent" $ARGS -init
+install_agent() {
+  if [ "$FORCE" = 0 ] && [ -x "$BIN/nodehub-agent" ] && need sha256sum; then
+    local want cur
+    want="$($CURL_HEAD "$MASTER/dl/agent?arch=$ARCH" 2>/dev/null | awk 'BEGIN{IGNORECASE=1}/^X-Checksum-Sha256:/{gsub(/\r/,""); print $2; exit}' || true)"
+    cur="$(sha256sum "$BIN/nodehub-agent" | awk '{print $1}')"
+    if [ -n "$want" ] && [ "$want" = "$cur" ]; then
+      echo "==> nodehub-agent ($ARCH) 已是最新版本，跳过下载"
+      return 0
+    fi
+  fi
+  echo "==> downloading agent ($ARCH)"
+  $CURL -D "$TMP/agent.hdr" -o "$TMP/agent" "$MASTER/dl/agent?arch=$ARCH"
+  verify_sha "$TMP/agent" "$TMP/agent.hdr" "nodehub-agent"
+  atomic_install "$TMP/agent" "$BIN/nodehub-agent"
+}
 
+install_xray() {
+  [ "$WITH_XRAY" = 1 ] || return 0
+  if [ "$FORCE" = 0 ] && [ -x "$BIN/xray" ] && "$BIN/xray" version 2>/dev/null | head -n 1 | grep -qF "${XRAY_VERSION#v}"; then
+    echo "==> Xray $XRAY_VERSION 已安装，跳过下载"
+    return 0
+  fi
+  echo "==> installing Xray $XRAY_VERSION"
+  # Prefer pre-compressed standalone binary from master (no unzip & no 15MB unused geoip/geosite)
+  if $CURL -D "$TMP/xray.hdr" -o "$TMP/xray.bin" "$MASTER/dl/xray-linux-$ARCH" 2>/dev/null; then
+    verify_sha "$TMP/xray.bin" "$TMP/xray.hdr" "xray"
+    atomic_install "$TMP/xray.bin" "$BIN/xray"
+    return 0
+  fi
+  $CURL -o "$TMP/xray.zip" "${GH}https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-linux-${XARCH}.zip"
+  extract_zip_member "$TMP/xray.zip" "xray" "$TMP/xray.bin"
+  atomic_install "$TMP/xray.bin" "$BIN/xray"
+}
+
+install_singbox() {
+  [ "$WITH_SINGBOX" = 1 ] || return 0
+  if [ "$FORCE" = 0 ] && [ -x "$BIN/sing-box" ] && "$BIN/sing-box" version 2>/dev/null | head -n 1 | grep -qF "$SINGBOX_VERSION"; then
+    echo "==> sing-box $SINGBOX_VERSION 已安装，跳过下载"
+    return 0
+  fi
+  echo "==> installing sing-box $SINGBOX_VERSION"
+  # Prefer the build served by master (compiled with v2ray_api for per-user traffic stats & gzip pre-compressed)
+  if $CURL -D "$TMP/sb.hdr" -o "$TMP/sing-box.bin" "$MASTER/dl/sing-box-linux-$ARCH" 2>/dev/null; then
+    verify_sha "$TMP/sing-box.bin" "$TMP/sb.hdr" "sing-box"
+    atomic_install "$TMP/sing-box.bin" "$BIN/sing-box"
+    return 0
+  fi
+  echo "    master has no sing-box build, falling back to official release"
+  need tar || pkg_install tar
+  $CURL -o "$TMP/sb.tgz" "${GH}https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-${ARCH}.tar.gz"
+  tar xzf "$TMP/sb.tgz" -C "$TMP"
+  atomic_install "$TMP"/sing-box-*/sing-box "$BIN/sing-box"
+}
+
+echo "==> 并行拉取核心组件 (agent / xray / sing-box) 并同步执行内核网络调优..."
+install_agent   >"$TMP/log.agent"   2>&1 & PID_A=$!
+install_xray    >"$TMP/log.xray"    2>&1 & PID_X=$!
+install_singbox >"$TMP/log.singbox" 2>&1 & PID_S=$!
+
+# Run local systemd + sysctl + NIC tuning concurrently while downloads are in flight!
 # Scale cgroup memory budget with host RAM so agent + child proxy cores (xray/sing-box) never OOM-kill under load
 MEM_KB="$(awk '/^MemTotal:/ {print $2; exit}' /proc/meminfo 2>/dev/null || echo 1048576)"
 [ -n "$MEM_KB" ] && [ "$MEM_KB" -gt 0 ] 2>/dev/null || MEM_KB=1048576
@@ -150,8 +213,7 @@ if grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null;
   CC_ALGO="bbr"
 fi
 
-# Preserve IPv4 forwarding if already active or Docker is installed (prevents cloud images like
-# GCP's 60-gce-network-security.conf from resetting net.ipv4.ip_forward=0 on sysctl --system).
+# Preserve IPv4 forwarding if already active or Docker is installed
 IP_FWD_LINE=""
 if [ "$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null || echo 0)" = "1" ] || command -v docker >/dev/null 2>&1; then
   IP_FWD_LINE="net.ipv4.ip_forward = 1"
@@ -193,7 +255,8 @@ net.netfilter.nf_conntrack_udp_timeout = 60
 net.netfilter.nf_conntrack_udp_timeout_stream = 180
 fs.file-max = 1048576
 EOF
-sysctl --system >/dev/null 2>&1 || sysctl -p /etc/sysctl.d/99-z-nodehub.conf >/dev/null 2>&1 || true
+# Targeted apply is instant (~10ms) and avoids cloud-init sysctl files overriding ip_forward
+sysctl -p /etc/sysctl.d/99-z-nodehub.conf >/dev/null 2>&1 || true
 
 # Apply fq qdisc and NIC ring/offload tuning immediately without requiring a reboot
 MAIN_IFACE="$(ip route show default 2>/dev/null | awk '{print $5; exit}' || true)"
@@ -211,10 +274,29 @@ if [ -n "$MAIN_IFACE" ]; then
   fi
 fi
 
+# Wait for all 3 parallel downloads and print logs
+DL_FAIL=0
+wait "$PID_A" || DL_FAIL=1
+wait "$PID_X" || DL_FAIL=1
+wait "$PID_S" || DL_FAIL=1
+cat "$TMP/log.agent" "$TMP/log.xray" "$TMP/log.singbox" 2>/dev/null || true
+if [ "$DL_FAIL" != 0 ]; then
+  echo "组件下载或安装失败，请检查上述输出" >&2
+  exit 1
+fi
+
+ARGS="-config /etc/nodehub/agent.json -master $MASTER -token $TOKEN"
+[ "$INSECURE" = 1 ] && ARGS="$ARGS -insecure"
+"$BIN/nodehub-agent" $ARGS -init
+
 systemctl daemon-reload
-systemctl enable --now nodehub-agent
+systemctl enable nodehub-agent >/dev/null 2>&1 || true
 systemctl restart nodehub-agent
-sleep 2
-systemctl --no-pager --lines=5 status nodehub-agent || true
+
+if [ "$FAST" = 0 ]; then
+  sleep 1
+  systemctl --no-pager --lines=5 status nodehub-agent || true
+fi
+ELAPSED=$(( $(date +%s) - T_START ))
 echo
-echo "NodeHub agent installed. Logs: journalctl -u nodehub-agent -f"
+echo "NodeHub agent installed in ${ELAPSED}s. Logs: journalctl -u nodehub-agent -f"

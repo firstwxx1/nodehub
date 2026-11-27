@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"nodehub/internal/proto"
@@ -20,6 +21,26 @@ import (
 
 // cfAPIBase is overridable in tests.
 var cfAPIBase = "https://api.cloudflare.com/client/v4"
+
+var cfHTTPClient = &http.Client{
+	Timeout: 20 * time.Second,
+	Transport: &http.Transport{
+		MaxIdleConns:        16,
+		MaxIdleConnsPerHost: 8,
+		IdleConnTimeout:     90 * time.Second,
+		ForceAttemptHTTP2:   true,
+	},
+}
+
+type cfZonesCacheEntry struct {
+	zones   []cfZone
+	expires time.Time
+}
+
+var (
+	cfZonesMu    sync.Mutex
+	cfZonesCache = map[string]cfZonesCacheEntry{}
+)
 
 type cfZone struct {
 	ID     string `json:"id"`
@@ -51,8 +72,7 @@ func cfDo(token, method, path string, body any, out any) error {
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
-	hc := &http.Client{Timeout: 20 * time.Second}
-	resp, err := hc.Do(req)
+	resp, err := cfHTTPClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("Cloudflare API 请求失败: %w", err)
 	}
@@ -83,10 +103,20 @@ func cfDo(token, method, path string, body any, out any) error {
 }
 
 func cfListZones(token string) ([]cfZone, error) {
+	ck := util.SHA256Hex(token) + "@" + cfAPIBase
+	cfZonesMu.Lock()
+	if e, ok := cfZonesCache[ck]; ok && time.Now().Before(e.expires) {
+		cfZonesMu.Unlock()
+		return e.zones, nil
+	}
+	cfZonesMu.Unlock()
 	var zones []cfZone
 	if err := cfDo(token, "GET", "/zones?per_page=50&status=active", nil, &zones); err != nil {
 		return nil, err
 	}
+	cfZonesMu.Lock()
+	cfZonesCache[ck] = cfZonesCacheEntry{zones: zones, expires: time.Now().Add(10 * time.Minute)}
+	cfZonesMu.Unlock()
 	return zones, nil
 }
 

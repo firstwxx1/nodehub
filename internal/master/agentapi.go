@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"nodehub/internal/proto"
@@ -349,9 +350,60 @@ func displayUser(u *store.User) string {
 
 var safeName = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 
+type shaCacheEntry struct {
+	size    int64
+	modNano int64
+	sum     string
+}
+
+var (
+	dlShaMu    sync.Mutex
+	dlShaCache = map[string]shaCacheEntry{}
+)
+
+// fileSHA256 returns the hex SHA256 of p, using an in-memory cache and sidecar .sha256
+// file so downloads and HEAD checks do not re-hash 35MB binaries on every request.
+func fileSHA256(p string, st os.FileInfo) (string, error) {
+	dlShaMu.Lock()
+	if e, ok := dlShaCache[p]; ok && e.size == st.Size() && e.modNano == st.ModTime().UnixNano() {
+		dlShaMu.Unlock()
+		return e.sum, nil
+	}
+	dlShaMu.Unlock()
+
+	if sideSt, err := os.Stat(p + ".sha256"); err == nil && !sideSt.ModTime().Before(st.ModTime().Truncate(time.Second)) {
+		if raw, err := os.ReadFile(p + ".sha256"); err == nil {
+			fields := strings.Fields(string(raw))
+			if len(fields) > 0 && len(fields[0]) == 64 {
+				sum := strings.ToLower(fields[0])
+				dlShaMu.Lock()
+				dlShaCache[p] = shaCacheEntry{size: st.Size(), modNano: st.ModTime().UnixNano(), sum: sum}
+				dlShaMu.Unlock()
+				return sum, nil
+			}
+		}
+	}
+
+	f, err := os.Open(p)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	sum := hex.EncodeToString(h.Sum(nil))
+	dlShaMu.Lock()
+	dlShaCache[p] = shaCacheEntry{size: st.Size(), modNano: st.ModTime().UnixNano(), sum: sum}
+	dlShaMu.Unlock()
+	return sum, nil
+}
+
 func (s *Server) handleInstallScript(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
-	io.WriteString(w, strings.ReplaceAll(installScript, "__MASTER_URL__", s.publicURL(r)))
+	body := strings.ReplaceAll(installScript, "\r\n", "\n")
+	io.WriteString(w, strings.ReplaceAll(body, "__MASTER_URL__", s.publicURL(r)))
 }
 
 func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
@@ -368,24 +420,46 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := filepath.Join(s.opt.DistDir, name)
-	f, err := os.Open(p)
-	if err != nil {
+	st, err := os.Stat(p)
+	if err != nil || st.IsDir() {
 		writeErr(w, 404, "not found: "+name)
 		return
 	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
+	sum, err := fileSHA256(p, st)
+	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	if _, err := f.Seek(0, 0); err != nil {
-		writeErr(w, 500, err.Error())
-		return
-	}
-	st, _ := f.Stat()
-	w.Header().Set("X-Checksum-Sha256", hex.EncodeToString(h.Sum(nil)))
+	w.Header().Set("X-Checksum-Sha256", sum)
 	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Add("Vary", "Accept-Encoding")
+
+	// Serve pre-compressed .gz sidecar (~63% smaller transfer) when client accepts gzip
+	// and does not request a byte range. curl --compressed and Go http.Transport both
+	// transparently decompress and match X-Checksum-Sha256 against the raw binary.
+	if r.Header.Get("Range") == "" && strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") && !strings.HasSuffix(name, ".gz") {
+		gzPath := p + ".gz"
+		if gzSt, err := os.Stat(gzPath); err == nil && !gzSt.IsDir() && !gzSt.ModTime().Before(st.ModTime().Truncate(time.Second)) {
+			if gzf, err := os.Open(gzPath); err == nil {
+				defer gzf.Close()
+				w.Header().Set("Content-Encoding", "gzip")
+				http.ServeContent(w, r, name, gzSt.ModTime(), gzf)
+				if r.Method != http.MethodHead {
+					log.Printf("download %s (gzip %dB) by %s", name, gzSt.Size(), clientIP(r))
+				}
+				return
+			}
+		}
+	}
+
+	f, err := os.Open(p)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	defer f.Close()
 	http.ServeContent(w, r, name, st.ModTime(), f)
-	log.Printf("download %s by %s", name, clientIP(r))
+	if r.Method != http.MethodHead {
+		log.Printf("download %s (%dB) by %s", name, st.Size(), clientIP(r))
+	}
 }

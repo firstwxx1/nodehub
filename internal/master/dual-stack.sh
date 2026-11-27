@@ -12,9 +12,11 @@
 #     [--hop-ports 20000-40000] \
 #     [--reality-dest www.apple.com:443] \
 #     [--groups ""] \
-#     [--no-cf]
+#     [--no-cf] \
+#     [--force]
 set -euo pipefail
 
+T_START=$(date +%s)
 MASTER="__MASTER_URL__"
 API_KEY=""
 NAME=""
@@ -27,6 +29,7 @@ REALITY_DEST="www.apple.com:443"
 NODE_GROUPS=""
 NO_CF=0
 INSECURE=0
+FORCE=0
 IP_OVERRIDE=""
 
 while [ $# -gt 0 ]; do
@@ -44,8 +47,9 @@ while [ $# -gt 0 ]; do
     --groups)       NODE_GROUPS="$2"; shift 2 ;;
     --no-cf)        NO_CF=1; shift ;;
     --insecure)     INSECURE=1; shift ;;
+    --force)        FORCE=1; shift ;;
     -h|--help)
-      sed -n '2,15p' "$0"; exit 0 ;;
+      sed -n '2,16p' "$0"; exit 0 ;;
     *) echo "未知参数: $1" >&2; exit 1 ;;
   esac
 done
@@ -57,35 +61,50 @@ done
 
 need() { command -v "$1" >/dev/null 2>&1; }
 if ! need curl; then
-  if need apt-get; then apt-get update -y && apt-get install -y curl ca-certificates
-  elif need dnf; then dnf install -y curl ca-certificates
-  elif need yum; then yum install -y curl ca-certificates
-  elif need apk; then apk add --no-cache curl ca-certificates bash
+  if need apt-get; then apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates >/dev/null
+  elif need dnf; then dnf install -y -q curl ca-certificates >/dev/null
+  elif need yum; then yum install -y -q curl ca-certificates >/dev/null
+  elif need apk; then apk add --no-cache -q curl ca-certificates bash >/dev/null
   fi
 fi
 
-CURL="curl -fsSL --retry 3"
+CURL="curl -fsSL --compressed --connect-timeout 8 --retry 2 --retry-delay 1"
 [ "$INSECURE" = 1 ] && CURL="$CURL -k"
 
-# 1. 检测公网 IPv4 与地区代码
-PUB_IP="$IP_OVERRIDE"
-if [ -z "$PUB_IP" ]; then
-  for ep in "https://api4.ipify.org" "https://ipv4.icanhazip.com" "https://ifconfig.me/ip"; do
-    PUB_IP="$(curl -4 -fsS --max-time 6 "$ep" 2>/dev/null | tr -d '[:space:]' || true)"
-    if printf '%s' "$PUB_IP" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
-      break
-    fi
-    PUB_IP=""
-  done
-fi
-[ -z "$PUB_IP" ] && { echo "无法自动获取公网 IPv4，请用 --ip <IP> 手动指定" >&2; exit 1; }
+TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 
-if [ -z "$REGION" ]; then
-  REGION="$(curl -4 -fsS --max-time 5 "https://ipinfo.io/country" 2>/dev/null | tr -d '[:space:]' | tr 'a-z' 'A-Z' || true)"
-  if ! printf '%s' "$REGION" | grep -Eq '^[A-Z]{2}$'; then
-    REGION=""
-  fi
+# 1. 并发探测公网 IPv4 与地区代码（最快 ~0.2s 完成，避免串行等待）
+PUB_IP="$IP_OVERRIDE"
+PID_IP=""
+PID_RG=""
+if [ -z "$PUB_IP" ]; then
+  (
+    ip=""
+    for ep in "https://api4.ipify.org" "https://ipv4.icanhazip.com" "https://ifconfig.me/ip"; do
+      ip="$(curl -4 -fsS --connect-timeout 2 --max-time 3 "$ep" 2>/dev/null | tr -d '[:space:]' || true)"
+      if printf '%s' "$ip" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+        printf '%s' "$ip" > "$TMP/pub_ip"
+        exit 0
+      fi
+    done
+  ) &
+  PID_IP=$!
 fi
+if [ -z "$REGION" ]; then
+  (
+    rg="$(curl -4 -fsS --connect-timeout 2 --max-time 3 "https://ipinfo.io/country" 2>/dev/null | tr -d '[:space:]' | tr 'a-z' 'A-Z' || true)"
+    if printf '%s' "$rg" | grep -Eq '^[A-Z]{2}$'; then
+      printf '%s' "$rg" > "$TMP/region"
+    fi
+  ) &
+  PID_RG=$!
+fi
+[ -n "$PID_IP" ] && wait "$PID_IP" || true
+[ -n "$PID_RG" ] && wait "$PID_RG" || true
+[ -z "$PUB_IP" ] && [ -f "$TMP/pub_ip" ] && PUB_IP="$(cat "$TMP/pub_ip")"
+[ -z "$REGION" ] && [ -f "$TMP/region" ] && REGION="$(cat "$TMP/region")"
+
+[ -z "$PUB_IP" ] && { echo "无法自动获取公网 IPv4，请用 --ip <IP> 手动指定" >&2; exit 1; }
 
 echo "==> [1/3] 正在向 NodeHub 注册服务器并创建双栈节点（IP: ${PUB_IP}${REGION:+, 地区: $REGION}）..."
 
@@ -112,8 +131,7 @@ PAYLOAD=$(cat <<EOF
 EOF
 )
 
-TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
-HTTP_CODE="$(curl -sS $([ "$INSECURE" = 1 ] && echo -k) -o "$TMP/resp.json" -w '%{http_code}' \
+HTTP_CODE="$(curl -sS --compressed --connect-timeout 8 $([ "$INSECURE" = 1 ] && echo -k) -o "$TMP/resp.json" -w '%{http_code}' \
   -X POST "${MASTER}/api/open/v1/provision" \
   -H "Authorization: Bearer ${API_KEY}" \
   -H "Content-Type: application/json" \
@@ -172,22 +190,23 @@ echo "    证书模式:   ${RES_CERT_MODE:-self}"
 [ -n "$RES_VLESS_ID" ] && echo "    Reality:    节点 #${RES_VLESS_ID} · TCP ${RES_VLESS_PORT}"
 [ -n "$RES_WARNINGS" ] && echo "    提示:       ${RES_WARNINGS}"
 
-# 2. 若返回新 Agent Token，自动执行 NodeHub 官方安装脚本安装 agent + xray + sing-box + BBR 调优
+# 2. 若返回新 Agent Token，并行极速安装 agent + xray + sing-box + BBR 调优
 if [ -n "$AGENT_TOKEN" ]; then
-  echo "==> [2/3] 正在安装 NodeHub Agent + Xray + sing-box 并执行内核网络调优..."
-  INST_ARGS="--master ${MASTER} --token ${AGENT_TOKEN}"
+  echo "==> [2/3] 正在并行安装 NodeHub Agent + Xray + sing-box 并执行内核网络调优..."
+  INST_ARGS="--master ${MASTER} --token ${AGENT_TOKEN} --fast"
   [ "$INSECURE" = 1 ] && INST_ARGS="${INST_ARGS} --insecure"
+  [ "$FORCE" = 1 ] && INST_ARGS="${INST_ARGS} --force"
   $CURL "${MASTER}/install.sh" | bash -s -- $INST_ARGS
 else
-  echo "==> [2/3] 服务器已接入 NodeHub，跳过 Agent 重装，等待心跳自动拉取双栈配置..."
+  echo "==> [2/3] 服务器已接入 NodeHub，跳过 Agent 重装，触发立即拉取双栈配置..."
   systemctl restart nodehub-agent 2>/dev/null || true
 fi
 
-# 3. 等待 xray 与 sing-box 双内核拉起并校验监听
-echo "==> [3/3] 等待 Agent 同步配置并拉起双内核（最长 35 秒）..."
+# 3. 高频检测（0.5s 轮询）xray 与 sing-box 双内核端口就绪
+echo "==> [3/3] 等待 Agent 同步配置并拉起双内核..."
 XRAY_OK=0
 SB_OK=0
-for i in $(seq 1 18); do
+for i in $(seq 1 50); do
   if [ -n "$RES_VLESS_PORT" ] && ss -tlnp 2>/dev/null | grep -Eq ":${RES_VLESS_PORT}[[:space:]].*xray"; then
     XRAY_OK=1
   fi
@@ -197,12 +216,13 @@ for i in $(seq 1 18); do
   if { [ -z "$RES_VLESS_PORT" ] || [ "$XRAY_OK" = 1 ]; } && { [ -z "$RES_HY2_PORT" ] || [ "$SB_OK" = 1 ]; }; then
     break
   fi
-  sleep 2
+  sleep 0.5
 done
 
+ELAPSED=$(( $(date +%s) - T_START ))
 echo ""
 echo "================================================================"
-echo " NodeHub 一键双栈部署完成：${NAME} (${PUB_IP})"
+echo " NodeHub 一键双栈部署完成：${NAME} (${PUB_IP}) · 总耗时 ${ELAPSED}s"
 if [ -n "$RES_DOMAIN" ]; then
   echo " 绑定域名：${RES_DOMAIN}（$([ "$RES_CERT_MODE" = "acme_dns" ] && echo 'Cloudflare DNS-01 自动签发与续期证书' || echo "证书模式: ${RES_CERT_MODE:-self}")）"
 fi

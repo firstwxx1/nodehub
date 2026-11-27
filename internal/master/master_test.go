@@ -2,11 +2,14 @@ package master
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -709,5 +712,86 @@ func TestDualStackProvisionWithCloudflare(t *testing.T) {
 	})
 	if code2 != 200 || out2["created_server"] != false || out2["dns_action"] != "unchanged" {
 		t.Fatalf("second provision mismatch %d: %v", code2, out2)
+	}
+}
+
+func TestDownloadGzipAndChecksumCache(t *testing.T) {
+	dist := t.TempDir()
+	raw := bytes.Repeat([]byte("nodehub-fast-binary-payload-"), 512)
+	binPath := filepath.Join(dist, "sing-box-linux-amd64")
+	if err := os.WriteFile(binPath, raw, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var gzBuf bytes.Buffer
+	gw := gzip.NewWriter(&gzBuf)
+	_, _ = gw.Write(raw)
+	_ = gw.Close()
+	if err := os.WriteFile(binPath+".gz", gzBuf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := New(Options{DataDir: t.TempDir(), DistDir: dist, AdminPass: "test-pass-123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(s.middleware(s.mux))
+	defer ts.Close()
+
+	// Explicit Accept-Encoding: gzip should serve pre-compressed .gz + raw SHA256 header
+	req, _ := http.NewRequest("GET", ts.URL+"/dl/sing-box-linux-amd64", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	cl := &http.Client{Transport: &http.Transport{DisableCompression: true}}
+	resp, err := cl.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || resp.Header.Get("Content-Encoding") != "gzip" {
+		t.Fatalf("want 200 gzip, got %d encoding=%q", resp.StatusCode, resp.Header.Get("Content-Encoding"))
+	}
+	if len(body) >= len(raw) {
+		t.Fatalf("gzip body (%d) should be smaller than raw (%d)", len(body), len(raw))
+	}
+	wantSum := util.SHA256Hex(string(raw))
+	if got := resp.Header.Get("X-Checksum-Sha256"); got != wantSum {
+		t.Fatalf("X-Checksum-Sha256 mismatch: want %s got %s", wantSum, got)
+	}
+	// Verify decompressed bytes equal raw payload
+	gr, err := gzip.NewReader(bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, _ := io.ReadAll(gr)
+	_ = gr.Close()
+	if !bytes.Equal(plain, raw) {
+		t.Fatalf("decompressed payload mismatch")
+	}
+
+	// HEAD request returns checksum without body
+	headReq, _ := http.NewRequest("HEAD", ts.URL+"/dl/sing-box-linux-amd64", nil)
+	headResp, err := cl.Do(headReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	headResp.Body.Close()
+	if headResp.StatusCode != 200 || headResp.Header.Get("X-Checksum-Sha256") != wantSum {
+		t.Fatalf("HEAD mismatch: %d sha=%q", headResp.StatusCode, headResp.Header.Get("X-Checksum-Sha256"))
+	}
+
+	// Verify install.sh has parallel downloads, --compressed, LF endings, and no redundant apt-get unzip
+	instResp, err := http.Get(ts.URL + "/install.sh")
+	if err != nil || instResp.StatusCode != 200 {
+		t.Fatalf("install.sh: %v %v", err, instResp)
+	}
+	instBody, _ := io.ReadAll(instResp.Body)
+	instResp.Body.Close()
+	for _, want := range []string{"--compressed", "PID_A=$!", "PID_X=$!", "PID_S=$!", "extract_zip_member"} {
+		if !strings.Contains(string(instBody), want) {
+			t.Fatalf("install.sh missing %q", want)
+		}
+	}
+	if strings.Contains(string(instBody), "\r") {
+		t.Fatalf("install.sh must use LF line endings")
 	}
 }
