@@ -613,6 +613,7 @@ function nodeForm(n, servers, panels) {
     ${inp('监听地址', 'listen', n.listen, { ph: '默认 0.0.0.0（全部）' })}
     ${inp('客户端连接地址', 'address', n.address, { ph: '默认用服务器地址；可填 CDN/中转域名', hint: '写进订阅的地址' })}
     ${inp('检测 IP', 'egress_ip', n.egress_ip, { ph: '默认用服务器公网 IP', hint: '多 IP / 落地机时填出口 IP' })}
+    ${inp('前置中转代理', 'settings.dialer_proxy', s.dialer_proxy, { ph: '可选，例如 🌏 亚洲中转 或亚洲节点名', hint: '写入 Clash dialer-proxy / sing-box detour / Surge underlying-proxy', full: true })}
 
     <h4 data-when="proto:vless,vmess,trojan">传输与安全</h4>
     ${inp('传输方式', 'settings.network', s.network || 'tcp', { opts: [['tcp', 'TCP (RAW)'], ['ws', 'WebSocket'], ['grpc', 'gRPC'], ['xhttp', 'XHTTP（仅 Xray）'], ['httpupgrade', 'HTTPUpgrade']], when: 'proto:vless,vmess,trojan' })}
@@ -792,11 +793,12 @@ async function scriptEdit(n, reload) {
   modal('编辑节点（原版脚本）', `<div class="form">${inp('节点名称', 'name', n.name)}${inp('分组', 'groups', n.groups || '')}
     ${inp('倍率', 'rate', n.rate, { dtype: 'float' })}
     ${inp('端口跳跃', 'hop_ports', n.settings.hop_ports || '', { ph: '例如 20000-40000，清空 = 订阅里不带跳跃', hint: '只影响订阅内容；服务器上的跳跃规则由脚本管理' })}
+    ${inp('前置中转代理', 'dialer_proxy', n.settings.dialer_proxy || '', { ph: '可选，例如 🌏 亚洲中转 或亚洲节点名', hint: '写入 Clash dialer-proxy / sing-box detour / Surge underlying-proxy', full: true })}
     ${inp('伪装 / 带宽等', 'info', `端口 ${n.port}/UDP · 证书 ${n.settings.cert_mode} · SNI ${n.settings.sni}`, { attrs: 'disabled', full: true })}</div>
     <p class="muted" style="font-size:12px;margin-bottom:0">端口、证书、密码由原版脚本管理。要改它们，请登录服务器运行脚本菜单（<code>bash install.sh</code>），改完在服务器页面「导入现有节点」重新扫描。</p>`, {
     ok: async (mm) => {
       const f = readForm(mm);
-      n.name = f.name; n.groups = f.groups; n.rate = f.rate || 1; n.settings.hop_ports = f.hop_ports;
+      n.name = f.name; n.groups = f.groups; n.rate = f.rate || 1; n.settings.hop_ports = f.hop_ports; n.settings.dialer_proxy = f.dialer_proxy || '';
       await api('PUT', '/api/nodes/' + n.id, n); toast('已保存'); reload && reload();
     },
   });
@@ -1111,7 +1113,7 @@ PAGES.settings = async (el) => {
   const section = (title, body, key) => `<div class="card" data-sec="${key}"><div class="card-h"><h3>${title}</h3><span class="spacer"></span><button class="btn primary sm" data-act="save">保存</button></div><div class="card-b"><div class="form">${body}</div></div></div>`;
   el.innerHTML = topbar('设置', '') + `<div class="grid" style="gap:14px">
     ${section('基本', `${inp('站点名称', 'site_name', s.site_name)}${inp('面板公开地址', 'public_url', s.public_url, { ph: 'https://nodes.example.com', hint: 'Agent 安装命令与订阅使用；留空则按访问地址' })}
-      ${inp('订阅域名', 'sub_url', s.sub_url, { ph: '留空同上', hint: '可单独给订阅一个域名，与后台分开' })}${inp('订阅节点名模板', 'sub_name_template', s.sub_name_template, { hint: '可用 {flag} {name} {region} {protocol} {rate}' })}${inp('Hy2 客户端下行 Mbps', 'sub_hy2_down_mbps', s.sub_hy2_down_mbps || '', { ph: '留空 = 不声明（BBR）', hint: '填了才会启用 Brutal：按这个速率发送、主动对抗丢包。按晚高峰实测速度的 70%–80% 填，填太大反而更卡' })}${inp('Hy2 客户端上行 Mbps', 'sub_hy2_up_mbps', s.sub_hy2_up_mbps || '', { ph: '例如 20' })}${inp('订阅分流规则', 'sub_rule_mode', s.sub_rule_mode || 'smart', { opts: [['smart', '智能分流：国内直连、国外按业务分流（推荐）'], ['global', '全局代理：除局域网外全部走代理']], hint: 'Clash / sing-box / Surge 订阅使用；也可在订阅链接后加 ?rules=smart 或 ?rules=global 单独指定' })}
+      ${inp('订阅域名', 'sub_url', s.sub_url, { ph: '留空同上', hint: '可单独给订阅一个域名，与后台分开' })}${inp('订阅节点名模板', 'sub_name_template', s.sub_name_template, { hint: '可用 {flag} {name} {region} {protocol} {rate}' })}${inp('Hy2 客户端下行 Mbps', 'sub_hy2_down_mbps', s.sub_hy2_down_mbps || '', { ph: '推荐 200；留空 = BBR', hint: '对 Clash / sing-box / Surge / Shadowrocket / v2rayNG 全部生效，启用 Brutal 主动对抗丢包；按实测宽带 70%–80% 填' })}${inp('Hy2 客户端上行 Mbps', 'sub_hy2_up_mbps', s.sub_hy2_up_mbps || '', { ph: '推荐 50' })}${inp('订阅分流规则', 'sub_rule_mode', s.sub_rule_mode || 'smart', { opts: [['smart', '智能分流：国内直连、国外按业务分流（推荐）'], ['global', '全局代理：除局域网外全部走代理']], hint: 'Clash / sing-box / Surge 订阅使用；也可在订阅链接后加 ?rules=smart 或 ?rules=global 单独指定' })}${inp('欧美节点亚洲中转', 'sub_relay_mode', s.sub_relay_mode || 'auto', { opts: [['auto', '自动开启：经亚洲节点中转欧美落地，保留原生出口 IP（推荐）'], ['off', '关闭：仅输出直连节点']], hint: '自动生成「🌏 亚洲中转」与「🚀 中转·欧美节点」，晚高峰绕过跨太平洋丢包；支持 ?relay=auto|off 覆盖' })}
       ${inp('订阅「官网」链接', 'sub_support_url', s.sub_support_url, { full: true, ph: '客户端里显示的网站链接，可填商城地址' })}`, 'basic')}
     ${section('Agent 与监控', `${inp('Agent 上报间隔（秒）', 'report_interval', s.report_interval, { type: 'number' })}${inp('离线判定（秒无心跳）', 'offline_after', s.offline_after, { type: 'number' })}
       ${inp('流量明细保留天数', 'traffic_retention_days', s.traffic_retention_days, { type: 'number' })}${inp('VPS 到期提前提醒（天）', 'server_expire_remind_days', s.server_expire_remind_days || 3, { type: 'number' })}

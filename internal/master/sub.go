@@ -28,6 +28,10 @@ type subNode struct {
 	Country string
 	// client bandwidth for hysteria2 (Mbps): >0 makes the server use Brutal instead of BBR
 	UpMbps, DownMbps int
+	// optional front-end relay proxy or group name (Clash dialer-proxy / sing-box detour / Surge underlying-proxy)
+	DialerProxy string
+	// true for auto-generated Asia->US/EU relay variants
+	IsRelay bool
 }
 
 func flagEmoji(cc string) string {
@@ -64,7 +68,13 @@ func (s *Server) userNodes(u *store.User) []subNode {
 		}
 		name := strings.NewReplacer("{flag}", flagEmoji(cc), "{name}", n.Name, "{region}", srv.Region, "{protocol}", n.Protocol,
 			"{rate}", strconv.FormatFloat(n.Rate, 'f', -1, 64)).Replace(tpl)
-		sn := subNode{Node: n, Name: strings.TrimSpace(name), Addr: s.connectAddr(n, srv), Country: cc}
+		sn := subNode{
+			Node:        n,
+			Name:        strings.TrimSpace(name),
+			Addr:        s.connectAddr(n, srv),
+			Country:     cc,
+			DialerProxy: strings.TrimSpace(n.Settings.DialerProxy),
+		}
 		if n.Protocol == "hysteria2" && upM > 0 && downM > 0 {
 			sn.UpMbps, sn.DownMbps = upM, downM
 		}
@@ -214,6 +224,10 @@ func shareLink(sn subNode, u *store.User) string {
 			q.Set("obfs", "salamander")
 			q.Set("obfs-password", st.ObfsPassword)
 		}
+		if sn.UpMbps > 0 && sn.DownMbps > 0 {
+			q.Set("upmbps", strconv.Itoa(sn.UpMbps))
+			q.Set("downmbps", strconv.Itoa(sn.DownMbps))
+		}
 		return "hysteria2://" + url.PathEscape(sn.pw(u)) + "@" + hostPort(sn.Addr, n.Port) + "?" + q.Encode() + frag
 	case "tuic":
 		q.Set("sni", st.SNI)
@@ -329,7 +343,7 @@ func clashProxy(sn subNode, u *store.User) map[string]any {
 	case "hysteria2":
 		p["type"] = "hysteria2"
 		p["password"] = sn.pw(u)
-		if st.HopPorts != "" {
+		if st.HopPorts != "" && sn.DialerProxy == "" {
 			p["ports"] = st.HopPorts
 			p["hop-interval"] = 60
 		}
@@ -342,7 +356,7 @@ func clashProxy(sn subNode, u *store.User) map[string]any {
 			p["obfs"] = "salamander"
 			p["obfs-password"] = st.ObfsPassword
 		}
-		if sn.DownMbps > 0 {
+		if sn.UpMbps > 0 && sn.DownMbps > 0 {
 			p["up"], p["down"] = fmt.Sprintf("%d Mbps", sn.UpMbps), fmt.Sprintf("%d Mbps", sn.DownMbps)
 		}
 	case "tuic":
@@ -362,6 +376,9 @@ func clashProxy(sn subNode, u *store.User) map[string]any {
 	default:
 		return nil
 	}
+	if sn.DialerProxy != "" {
+		p["dialer-proxy"] = sn.DialerProxy
+	}
 	return p
 }
 
@@ -379,6 +396,113 @@ func (s *Server) smartRules(r *http.Request) bool {
 		m = s.st.SettingOr("sub_rule_mode", "smart")
 	}
 	return m == "smart"
+}
+
+// autoRelay: "auto" (default) synthesizes Asia-relayed copies of US/EU landing nodes
+// (via dialer-proxy / detour / underlying-proxy -> "🌏 亚洲中转") so clients bypass trans-Pacific
+// packet loss while preserving native US/EU exit IPs; "off" disables auto-relays.
+// ?relay=auto|off overrides sub_relay_mode.
+func (s *Server) autoRelay(r *http.Request) bool {
+	m := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("relay")))
+	if m == "" {
+		m = strings.ToLower(strings.TrimSpace(s.st.SettingOr("sub_relay_mode", "auto")))
+	}
+	return m != "off" && m != "0" && m != "false"
+}
+
+const (
+	asiaRelayGroupName = "🌏 亚洲中转"
+	usEuRelayGroupName = "🚀 欧美中转"
+)
+
+func isAsiaRelayRegion(regionKey string) bool {
+	switch regionKey {
+	case "HK", "TW", "JP", "SG", "KR":
+		return true
+	}
+	return false
+}
+
+func isRelayTargetRegion(regionKey string) bool {
+	return regionKey == "US" || regionKey == "EU"
+}
+
+func isUDPProtocol(protoName string) bool {
+	return protoName == "hysteria2" || protoName == "tuic"
+}
+
+func relayDisplayName(base string) string {
+	clean := strings.TrimSpace(base)
+	for _, suf := range []string{"-TCP", " TCP", "-tcp", " tcp", " VLESS", " Hysteria2"} {
+		if strings.HasSuffix(clean, suf) && len(clean) > len(suf) {
+			clean = strings.TrimSpace(strings.TrimSuffix(clean, suf))
+			break
+		}
+	}
+	return "🚀 中转·" + clean
+}
+
+// buildAutoRelays returns direct Asia relay node names (for "🌏 亚洲中转") and synthesized relayed
+// copies of US/EU landing nodes (one best node per server, preferring TCP protocols such as
+// VLESS-Reality over UDP to avoid UDP-in-UDP encapsulation overhead).
+func buildAutoRelays(directNodes []subNode, relayGroup string) (asiaRelays []string, relayed []subNode) {
+	existingNames := map[string]bool{}
+	for _, sn := range directNodes {
+		existingNames[sn.Name] = true
+		if sn.DialerProxy == "" && isAsiaRelayRegion(detectRegionKey(sn)) {
+			asiaRelays = append(asiaRelays, sn.Name)
+		}
+	}
+	if len(asiaRelays) == 0 {
+		return nil, nil
+	}
+
+	type candidate struct {
+		sn  subNode
+		tcp bool
+	}
+	var order []string
+	best := map[string]candidate{}
+	for _, sn := range directNodes {
+		if sn.DialerProxy != "" || sn.Node == nil || !isRelayTargetRegion(detectRegionKey(sn)) {
+			continue
+		}
+		var key string
+		if sn.Node.ServerID > 0 {
+			key = fmt.Sprintf("s:%d", sn.Node.ServerID)
+		} else {
+			key = "a:" + sn.Addr + "|" + relayDisplayName(sn.Name)
+		}
+		tcp := !isUDPProtocol(sn.Node.Protocol)
+		prev, ok := best[key]
+		if !ok {
+			order = append(order, key)
+			best[key] = candidate{sn: sn, tcp: tcp}
+		} else if !prev.tcp && tcp {
+			best[key] = candidate{sn: sn, tcp: true}
+		}
+	}
+
+	for _, k := range order {
+		base := best[k].sn
+		name := relayDisplayName(base.Name)
+		if existingNames[name] {
+			for i := 2; ; i++ {
+				cand := fmt.Sprintf("%s %d", name, i)
+				if !existingNames[cand] {
+					name = cand
+					break
+				}
+			}
+		}
+		existingNames[name] = true
+		cp := base
+		cp.Name = name
+		cp.DialerProxy = relayGroup
+		cp.IsRelay = true
+		relayed = append(relayed, cp)
+	}
+	return asiaRelays, relayed
 }
 
 var netCheckExactDomains = []string{
@@ -550,7 +674,7 @@ func classifySubNodes(nodes []subNode) nodeCatalog {
 	return cat
 }
 
-func renderClash(nodes []subNode, u *store.User, site string, smart bool) string {
+func renderClash(nodes []subNode, u *store.User, site string, smart, relay bool) string {
 	var sb strings.Builder
 	sb.WriteString("# " + site + " — generated by NodeHub\n")
 	sb.WriteString("mixed-port: 7890\nallow-lan: false\nmode: rule\nlog-level: warning\nipv6: false\nunified-delay: true\ntcp-concurrent: true\nfind-process-mode: strict\nkeep-alive-interval: 30\nexternal-controller: 127.0.0.1:9090\n\n")
@@ -577,6 +701,18 @@ func renderClash(nodes []subNode, u *store.User, site string, smart bool) string
 		sb.WriteString("  - " + yamlStr(p) + "\n")
 		validNodes = append(validNodes, sn)
 	}
+	var asiaRelays, relayNames []string
+	if relay {
+		var relayedNodes []subNode
+		asiaRelays, relayedNodes = buildAutoRelays(validNodes, asiaRelayGroupName)
+		for _, rn := range relayedNodes {
+			if p := clashProxy(rn, u); p != nil {
+				sb.WriteString("  - " + yamlStr(p) + "\n")
+				validNodes = append(validNodes, rn)
+				relayNames = append(relayNames, rn.Name)
+			}
+		}
+	}
 
 	cat := classifySubNodes(validNodes)
 	names := cat.All
@@ -591,10 +727,15 @@ func renderClash(nodes []subNode, u *store.User, site string, smart bool) string
 	tcpGrp := "🛡️ 稳定 TCP"
 	direct := "国内直连"
 	dual := cat.hasDualStack()
+	hasRelay := len(relayNames) > 0 && len(asiaRelays) > 0
 
 	protoGroups := []string{}
 	if dual {
 		protoGroups = []string{udpGrp, tcpGrp}
+	}
+	relayGroups := []string{}
+	if hasRelay {
+		relayGroups = []string{usEuRelayGroupName}
 	}
 	allRegions := cat.regionNames()
 	aiRegions := cat.regionNames("US", "JP", "TW", "SG", "KR", "EU", "OTHER")
@@ -604,7 +745,7 @@ func renderClash(nodes []subNode, u *store.User, site string, smart bool) string
 
 	sb.WriteString("proxy-groups:\n")
 	// 1. 核心调度组
-	topList := dedupStrings([]string{auto, fb}, protoGroups, allRegions, []string{direct}, names)
+	topList := dedupStrings([]string{auto, fb}, protoGroups, relayGroups, allRegions, []string{direct}, names)
 	sb.WriteString("  - " + yamlStr(map[string]any{"name": sel, "type": "select", "proxies": topList}) + "\n")
 	sb.WriteString("  - " + yamlStr(map[string]any{"name": auto, "type": "url-test", "url": "https://www.gstatic.com/generate_204", "interval": 180, "tolerance": 50, "lazy": true, "proxies": names}) + "\n")
 	fbProxies := names
@@ -617,24 +758,29 @@ func renderClash(nodes []subNode, u *store.User, site string, smart bool) string
 		sb.WriteString("  - " + yamlStr(map[string]any{"name": udpGrp, "type": "url-test", "url": "https://www.gstatic.com/generate_204", "interval": 180, "tolerance": 50, "lazy": true, "proxies": cat.UDP}) + "\n")
 		sb.WriteString("  - " + yamlStr(map[string]any{"name": tcpGrp, "type": "url-test", "url": "https://www.gstatic.com/generate_204", "interval": 180, "tolerance": 50, "lazy": true, "proxies": cat.TCP}) + "\n")
 	}
+	if hasRelay {
+		// 欧美中转组通过 🌏 亚洲中转 绕过跨太平洋晚高峰丢包，同时保留欧美原生出口 IP
+		sb.WriteString("  - " + yamlStr(map[string]any{"name": usEuRelayGroupName, "type": "url-test", "url": "https://www.gstatic.com/generate_204", "interval": 180, "tolerance": 50, "lazy": true, "proxies": relayNames}) + "\n")
+		sb.WriteString("  - " + yamlStr(map[string]any{"name": asiaRelayGroupName, "type": "url-test", "url": "https://www.gstatic.com/generate_204", "interval": 180, "tolerance": 50, "lazy": true, "proxies": asiaRelays}) + "\n")
+	}
 
 	// 2. 精准业务分流组
-	stdBusiness := dedupStrings([]string{sel}, protoGroups, allRegions, []string{direct})
+	stdBusiness := dedupStrings([]string{sel}, protoGroups, relayGroups, allRegions, []string{direct})
 	aiTail := []string{sel, direct}
 	if dual {
 		aiTail = []string{tcpGrp, udpGrp, sel, direct}
 	}
-	sb.WriteString("  - " + yamlStr(map[string]any{"name": "AI", "type": "select", "proxies": dedupStrings(aiRegions, aiTail)}) + "\n")
+	sb.WriteString("  - " + yamlStr(map[string]any{"name": "AI", "type": "select", "proxies": dedupStrings(aiRegions, relayGroups, aiTail)}) + "\n")
 	sb.WriteString("  - " + yamlStr(map[string]any{"name": "YouTube", "type": "select", "proxies": stdBusiness}) + "\n")
 	sb.WriteString("  - " + yamlStr(map[string]any{"name": "Google", "type": "select", "proxies": stdBusiness}) + "\n")
 	ghOpts := stdBusiness
 	if dual {
-		ghOpts = dedupStrings([]string{sel, tcpGrp, udpGrp}, allRegions, []string{direct})
+		ghOpts = dedupStrings([]string{sel, tcpGrp, udpGrp}, relayGroups, allRegions, []string{direct})
 	}
 	sb.WriteString("  - " + yamlStr(map[string]any{"name": "GitHub", "type": "select", "proxies": ghOpts}) + "\n")
-	sb.WriteString("  - " + yamlStr(map[string]any{"name": "国际流媒体", "type": "select", "proxies": dedupStrings([]string{sel}, mediaRegions, protoGroups, []string{direct})}) + "\n")
+	sb.WriteString("  - " + yamlStr(map[string]any{"name": "国际流媒体", "type": "select", "proxies": dedupStrings([]string{sel}, mediaRegions, relayGroups, protoGroups, []string{direct})}) + "\n")
 	sb.WriteString("  - " + yamlStr(map[string]any{"name": "Telegram", "type": "select", "proxies": dedupStrings([]string{sel}, tgRegions, protoGroups, []string{direct})}) + "\n")
-	sb.WriteString("  - " + yamlStr(map[string]any{"name": "TikTok", "type": "select", "proxies": dedupStrings(ttRegions, []string{sel}, protoGroups, []string{direct})}) + "\n")
+	sb.WriteString("  - " + yamlStr(map[string]any{"name": "TikTok", "type": "select", "proxies": dedupStrings(ttRegions, relayGroups, []string{sel}, protoGroups, []string{direct})}) + "\n")
 	sb.WriteString("  - " + yamlStr(map[string]any{"name": "Steam", "type": "select", "proxies": stdBusiness}) + "\n")
 	sb.WriteString("  - " + yamlStr(map[string]any{"name": "Apple", "type": "select", "proxies": dedupStrings([]string{direct, sel}, allRegions)}) + "\n")
 	sb.WriteString("  - " + yamlStr(map[string]any{"name": "Microsoft", "type": "select", "proxies": dedupStrings([]string{direct, sel}, allRegions)}) + "\n")
@@ -807,7 +953,7 @@ func singboxOutbound(sn subNode, u *store.User) map[string]any {
 		o["type"], o["method"], o["password"] = "shadowsocks", st.Cipher, ssPassword(n, u)
 	case "hysteria2":
 		o["type"], o["password"] = "hysteria2", sn.pw(u)
-		if st.HopPorts != "" {
+		if st.HopPorts != "" && sn.DialerProxy == "" {
 			o["server_ports"] = []string{strings.Replace(st.HopPorts, "-", ":", 1)}
 			o["hop_interval"] = "60s"
 		}
@@ -815,7 +961,7 @@ func singboxOutbound(sn subNode, u *store.User) map[string]any {
 		if st.Obfs == "salamander" {
 			o["obfs"] = map[string]any{"type": "salamander", "password": st.ObfsPassword}
 		}
-		if sn.DownMbps > 0 {
+		if sn.UpMbps > 0 && sn.DownMbps > 0 {
 			o["up_mbps"], o["down_mbps"] = sn.UpMbps, sn.DownMbps
 		}
 	case "tuic":
@@ -829,16 +975,31 @@ func singboxOutbound(sn subNode, u *store.User) map[string]any {
 	default:
 		return nil
 	}
+	if sn.DialerProxy != "" {
+		o["detour"] = sn.DialerProxy
+	}
 	return o
 }
 
-func renderSingbox(nodes []subNode, u *store.User, smart bool) string {
+func renderSingbox(nodes []subNode, u *store.User, smart, relay bool) string {
 	var obs []any
 	var validNodes []subNode
 	for _, sn := range nodes {
 		if o := singboxOutbound(sn, u); o != nil {
 			obs = append(obs, o)
 			validNodes = append(validNodes, sn)
+		}
+	}
+	var asiaRelays, relayNames []string
+	if relay {
+		var relayedNodes []subNode
+		asiaRelays, relayedNodes = buildAutoRelays(validNodes, asiaRelayGroupName)
+		for _, rn := range relayedNodes {
+			if o := singboxOutbound(rn, u); o != nil {
+				obs = append(obs, o)
+				validNodes = append(validNodes, rn)
+				relayNames = append(relayNames, rn.Name)
+			}
 		}
 	}
 	cat := classifySubNodes(validNodes)
@@ -853,10 +1014,15 @@ func renderSingbox(nodes []subNode, u *store.User, smart bool) string {
 	tcpGrp := "🛡️ 稳定 TCP"
 	directTag := "国内直连"
 	dual := cat.hasDualStack()
+	hasRelay := len(relayNames) > 0 && len(asiaRelays) > 0
 
 	protoGroups := []string{}
 	if dual {
 		protoGroups = []string{udpGrp, tcpGrp}
+	}
+	relayGroups := []string{}
+	if hasRelay {
+		relayGroups = []string{usEuRelayGroupName}
 	}
 	allRegions := cat.regionNames()
 	aiRegions := cat.regionNames("US", "JP", "TW", "SG", "KR", "EU", "OTHER")
@@ -864,17 +1030,17 @@ func renderSingbox(nodes []subNode, u *store.User, smart bool) string {
 	tgRegions := cat.regionNames("SG", "JP", "TW", "US", "HK", "EU", "OTHER")
 	mediaRegions := cat.regionNames("TW", "JP", "US", "SG", "HK", "EU", "OTHER")
 
-	topOutbounds := dedupStrings([]string{auto}, protoGroups, allRegions, []string{directTag}, tags)
-	stdBusiness := dedupStrings([]string{sel}, protoGroups, allRegions, []string{directTag})
+	topOutbounds := dedupStrings([]string{auto}, protoGroups, relayGroups, allRegions, []string{directTag}, tags)
+	stdBusiness := dedupStrings([]string{sel}, protoGroups, relayGroups, allRegions, []string{directTag})
 	aiTail := []string{sel, directTag}
 	if dual {
 		aiTail = []string{tcpGrp, udpGrp, sel, directTag}
 	}
-	aiOpts := dedupStrings(aiRegions, aiTail)
-	ttOpts := dedupStrings(ttRegions, []string{sel}, protoGroups, []string{directTag})
+	aiOpts := dedupStrings(aiRegions, relayGroups, aiTail)
+	ttOpts := dedupStrings(ttRegions, relayGroups, []string{sel}, protoGroups, []string{directTag})
 	ghOpts := stdBusiness
 	if dual {
-		ghOpts = dedupStrings([]string{sel, tcpGrp, udpGrp}, allRegions, []string{directTag})
+		ghOpts = dedupStrings([]string{sel, tcpGrp, udpGrp}, relayGroups, allRegions, []string{directTag})
 	}
 
 	outbounds := []any{
@@ -887,6 +1053,12 @@ func renderSingbox(nodes []subNode, u *store.User, smart bool) string {
 			map[string]any{"type": "urltest", "tag": tcpGrp, "outbounds": cat.TCP, "url": "https://www.gstatic.com/generate_204", "interval": "3m", "tolerance": 50},
 		)
 	}
+	if hasRelay {
+		outbounds = append(outbounds,
+			map[string]any{"type": "urltest", "tag": usEuRelayGroupName, "outbounds": relayNames, "url": "https://www.gstatic.com/generate_204", "interval": "3m", "tolerance": 50},
+			map[string]any{"type": "urltest", "tag": asiaRelayGroupName, "outbounds": asiaRelays, "url": "https://www.gstatic.com/generate_204", "interval": "3m", "tolerance": 50},
+		)
+	}
 	for _, r := range cat.Regions {
 		outbounds = append(outbounds, map[string]any{"type": "urltest", "tag": r.Name, "outbounds": r.Nodes, "url": "https://www.gstatic.com/generate_204", "interval": "3m", "tolerance": 50})
 	}
@@ -895,7 +1067,7 @@ func renderSingbox(nodes []subNode, u *store.User, smart bool) string {
 		map[string]any{"type": "selector", "tag": "YouTube", "default": sel, "outbounds": stdBusiness, "interrupt_exist_connections": true},
 		map[string]any{"type": "selector", "tag": "Google", "default": sel, "outbounds": stdBusiness, "interrupt_exist_connections": true},
 		map[string]any{"type": "selector", "tag": "GitHub", "default": sel, "outbounds": ghOpts, "interrupt_exist_connections": true},
-		map[string]any{"type": "selector", "tag": "国际流媒体", "default": sel, "outbounds": dedupStrings([]string{sel}, mediaRegions, protoGroups, []string{directTag}), "interrupt_exist_connections": true},
+		map[string]any{"type": "selector", "tag": "国际流媒体", "default": sel, "outbounds": dedupStrings([]string{sel}, mediaRegions, relayGroups, protoGroups, []string{directTag}), "interrupt_exist_connections": true},
 		map[string]any{"type": "selector", "tag": "Steam", "default": sel, "outbounds": stdBusiness, "interrupt_exist_connections": true},
 		map[string]any{"type": "selector", "tag": "Telegram", "default": sel, "outbounds": dedupStrings([]string{sel}, tgRegions, protoGroups, []string{directTag}), "interrupt_exist_connections": true},
 		map[string]any{"type": "selector", "tag": "TikTok", "default": ttOpts[0], "outbounds": ttOpts, "interrupt_exist_connections": true},
@@ -1041,6 +1213,10 @@ func surgeLine(sn subNode, u *store.User) string {
 	if insecure(n) {
 		skip = ", skip-cert-verify=true"
 	}
+	under := ""
+	if sn.DialerProxy != "" {
+		under = ", underlying-proxy=" + strings.ReplaceAll(sn.DialerProxy, ",", " ")
+	}
 	ws := func() string {
 		if st.Network == "ws" {
 			s := ", ws=true, ws-path=" + orStr(st.Path, "/")
@@ -1060,44 +1236,71 @@ func surgeLine(sn subNode, u *store.User) string {
 		if st.Security == "tls" {
 			s += ", tls=true, sni=" + st.SNI + skip
 		}
-		return s
+		return s + under
 	case "trojan":
-		return base + fmt.Sprintf("trojan, %s, %d, password=%s, sni=%s", sn.Addr, n.Port, sn.pw(u), st.SNI) + ws() + skip
+		return base + fmt.Sprintf("trojan, %s, %d, password=%s, sni=%s", sn.Addr, n.Port, sn.pw(u), st.SNI) + ws() + skip + under
 	case "shadowsocks":
-		return base + fmt.Sprintf("ss, %s, %d, encrypt-method=%s, password=%s, udp-relay=true", sn.Addr, n.Port, st.Cipher, ssPassword(n, u))
+		return base + fmt.Sprintf("ss, %s, %d, encrypt-method=%s, password=%s, udp-relay=true", sn.Addr, n.Port, st.Cipher, ssPassword(n, u)) + under
 	case "hysteria2":
 		hop := ""
-		if st.HopPorts != "" {
+		if st.HopPorts != "" && sn.DialerProxy == "" {
 			hop = ", port-hopping=" + st.HopPorts + ", port-hopping-interval=60"
 		}
 		bw := ""
 		if sn.DownMbps > 0 {
 			bw = fmt.Sprintf(", download-bandwidth=%d", sn.DownMbps)
 		}
-		return base + fmt.Sprintf("hysteria2, %s, %d, password=%s, sni=%s", sn.Addr, n.Port, sn.pw(u), st.SNI) + hop + bw + skip
+		return base + fmt.Sprintf("hysteria2, %s, %d, password=%s, sni=%s", sn.Addr, n.Port, sn.pw(u), st.SNI) + hop + bw + skip + under
 	case "tuic":
-		return base + fmt.Sprintf("tuic-v5, %s, %d, uuid=%s, password=%s, sni=%s, alpn=h3", sn.Addr, n.Port, u.UUID, sn.pw(u), st.SNI) + skip
+		return base + fmt.Sprintf("tuic-v5, %s, %d, uuid=%s, password=%s, sni=%s, alpn=h3", sn.Addr, n.Port, u.UUID, sn.pw(u), st.SNI) + skip + under
 	case "anytls":
-		return base + fmt.Sprintf("anytls, %s, %d, password=%s, sni=%s", sn.Addr, n.Port, sn.pw(u), st.SNI) + skip
+		return base + fmt.Sprintf("anytls, %s, %d, password=%s, sni=%s", sn.Addr, n.Port, sn.pw(u), st.SNI) + skip + under
 	}
 	return "" // vless is not supported by Surge
 }
 
-func renderSurge(nodes []subNode, u *store.User, selfURL string, smart bool) string {
+func renderSurge(nodes []subNode, u *store.User, selfURL string, smart, relay bool) string {
 	var sb strings.Builder
 	sb.WriteString("#!MANAGED-CONFIG " + selfURL + " interval=43200 strict=false\n\n[General]\nloglevel = notify\nskip-proxy = 127.0.0.1, 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12, localhost, *.local\n\n[Proxy]\n")
+	var validNodes []subNode
 	var names []string
 	for _, sn := range nodes {
 		if l := surgeLine(sn, u); l != "" {
 			sb.WriteString(l + "\n")
+			validNodes = append(validNodes, sn)
 			names = append(names, strings.ReplaceAll(sn.Name, ",", " "))
+		}
+	}
+	var asiaRelays, relayNames []string
+	if relay {
+		var relayedNodes []subNode
+		rawAsia, relayedNodes := buildAutoRelays(validNodes, asiaRelayGroupName)
+		for _, nm := range rawAsia {
+			asiaRelays = append(asiaRelays, strings.ReplaceAll(nm, ",", " "))
+		}
+		for _, rn := range relayedNodes {
+			if l := surgeLine(rn, u); l != "" {
+				sb.WriteString(l + "\n")
+				clean := strings.ReplaceAll(rn.Name, ",", " ")
+				names = append(names, clean)
+				relayNames = append(relayNames, clean)
+			}
 		}
 	}
 	if len(names) == 0 {
 		names = []string{"DIRECT"}
 	}
-	sb.WriteString("\n[Proxy Group]\nProxy = select, Auto, " + strings.Join(names, ", ") + "\n")
-	sb.WriteString("Auto = url-test, " + strings.Join(names, ", ") + ", url=http://www.gstatic.com/generate_204, interval=300\n")
+	hasRelay := len(relayNames) > 0 && len(asiaRelays) > 0
+	sb.WriteString("\n[Proxy Group]\n")
+	if hasRelay {
+		sb.WriteString("Proxy = select, Auto, " + usEuRelayGroupName + ", " + strings.Join(names, ", ") + "\n")
+		sb.WriteString("Auto = url-test, " + strings.Join(names, ", ") + ", url=http://www.gstatic.com/generate_204, interval=300\n")
+		sb.WriteString(usEuRelayGroupName + " = url-test, " + strings.Join(relayNames, ", ") + ", url=http://www.gstatic.com/generate_204, interval=180\n")
+		sb.WriteString(asiaRelayGroupName + " = url-test, " + strings.Join(asiaRelays, ", ") + ", url=http://www.gstatic.com/generate_204, interval=180\n")
+	} else {
+		sb.WriteString("Proxy = select, Auto, " + strings.Join(names, ", ") + "\n")
+		sb.WriteString("Auto = url-test, " + strings.Join(names, ", ") + ", url=http://www.gstatic.com/generate_204, interval=300\n")
+	}
 	sb.WriteString("\n[Rule]\n")
 	for _, d := range intlProxyDomains {
 		sb.WriteString("DOMAIN-SUFFIX," + d + ",Proxy\n")
@@ -1152,6 +1355,8 @@ func (s *Server) handleSub(w http.ResponseWriter, r *http.Request) {
 		nodes = placeholderNodes(u)
 	}
 	site := s.st.SettingOr("site_name", "NodeHub")
+	smart := s.smartRules(r)
+	relay := s.autoRelay(r)
 	w.Header().Set("Subscription-Userinfo", fmt.Sprintf("upload=%d; download=%d; total=%d; expire=%d", u.Up, u.Down, u.TrafficLimit, u.ExpireAt))
 	w.Header().Set("Profile-Update-Interval", "12")
 	w.Header().Set("Content-Disposition", "attachment; filename*=UTF-8''"+url.PathEscape(site))
@@ -1162,13 +1367,13 @@ func (s *Server) handleSub(w http.ResponseWriter, r *http.Request) {
 	switch detectTarget(r) {
 	case "clash", "mihomo", "meta", "stash":
 		w.Header().Set("Content-Type", "text/yaml; charset=utf-8")
-		fmt.Fprint(w, renderClash(nodes, u, site, s.smartRules(r)))
+		fmt.Fprint(w, renderClash(nodes, u, site, smart, relay))
 	case "singbox", "sing-box", "sfa":
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		fmt.Fprint(w, renderSingbox(nodes, u, s.smartRules(r)))
+		fmt.Fprint(w, renderSingbox(nodes, u, smart, relay))
 	case "surge":
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		fmt.Fprint(w, renderSurge(nodes, u, s.subURL(r)+r.URL.RequestURI(), s.smartRules(r)))
+		fmt.Fprint(w, renderSurge(nodes, u, s.subURL(r)+r.URL.RequestURI(), smart, relay))
 	default:
 		var lines []string
 		for _, sn := range nodes {

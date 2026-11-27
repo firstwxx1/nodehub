@@ -126,6 +126,8 @@ type NodeSettings struct {
 	ACMEDNSToken    string `json:"acme_dns_token,omitempty"`
 	// Hysteria2 masquerade: URL served to non-Hysteria HTTP/3 probes, e.g. https://www.bing.com
 	Masquerade string `json:"masquerade,omitempty"`
+	// Optional client-side front-end relay proxy or group name (Clash dialer-proxy / sing-box detour / Surge underlying-proxy).
+	DialerProxy string `json:"dialer_proxy,omitempty"`
 }
 
 // NodeUser is a user allowed on a node. Key is the stats identity (unique per node).

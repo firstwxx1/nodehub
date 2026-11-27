@@ -439,11 +439,11 @@ func TestScriptNodeAutoCreate(t *testing.T) {
 }
 
 func TestClashRuleModes(t *testing.T) {
-	g := renderClash(nil, &store.User{}, "x", false)
+	g := renderClash(nil, &store.User{}, "x", false, false)
 	if strings.Contains(g, "GEOSITE,CN") || strings.Contains(g, "GEOIP,CN") || !strings.Contains(g, "MATCH,") {
 		t.Fatalf("global mode must not send China sites direct:\n%s", g)
 	}
-	sm := renderClash(nil, &store.User{}, "x", true)
+	sm := renderClash(nil, &store.User{}, "x", true, false)
 	for _, want := range []string{
 		"GEOSITE,CN,DIRECT",
 		"GEOIP,CN,DIRECT,no-resolve",
@@ -468,33 +468,40 @@ func TestClashRuleModes(t *testing.T) {
 }
 
 func TestOptimizedRoutingGroups(t *testing.T) {
-	mk := func(name, proto, cc string) subNode {
-		n := &store.Node{Name: name, Protocol: proto, Port: 44443}
+	mk := func(srvID int64, name, proto, cc string) subNode {
+		n := &store.Node{ServerID: srvID, Name: name, Protocol: proto, Port: 44443}
 		n.Settings.SNI = "a.example.com"
 		if proto == "vless" {
 			n.Settings.Security = "reality"
 			n.Settings.RealityPublicKey = "pub"
 			n.Settings.RealityShortID = "1234"
+		} else if proto == "hysteria2" {
+			n.Settings.HopPorts = "20000-40000"
 		}
 		return subNode{Node: n, Name: name, Addr: "1.2.3.4", Country: cc}
 	}
 	nodes := []subNode{
-		mk("🇯🇵 阿里云日本", "hysteria2", "JP"),
-		mk("🇯🇵 阿里云日本-TCP", "vless", "JP"),
-		mk("🇺🇸 chicagovps", "hysteria2", "US"),
-		mk("🇺🇸 chicagovps-TCP", "vless", "US"),
-		mk("🇸🇪 AWS-瑞典EC2", "hysteria2", "SE"),
-		mk("🇸🇪 AWS-瑞典EC2-TCP", "vless", "SE"),
+		mk(1, "🇯🇵 阿里云日本", "hysteria2", "JP"),
+		mk(1, "🇯🇵 阿里云日本-TCP", "vless", "JP"),
+		mk(2, "🇺🇸 洛杉矶", "hysteria2", "US"),
+		mk(2, "🇺🇸 洛杉矶-TCP", "vless", "US"),
+		mk(3, "🇸🇪 AWS-瑞典EC2", "hysteria2", "SE"),
+		mk(3, "🇸🇪 AWS-瑞典EC2-TCP", "vless", "SE"),
 	}
 	// Verify region detection trusts Country code over vendor name (阿里云新加坡 -> SG, not JP)
-	if got := detectRegionKey(mk("🇸🇬 阿里云新加坡", "hysteria2", "SG")); got != "SG" {
+	if got := detectRegionKey(mk(4, "🇸🇬 阿里云新加坡", "hysteria2", "SG")); got != "SG" {
 		t.Fatalf("expected SG for 阿里云新加坡, got %q", got)
 	}
-	clash := renderClash(nodes, &store.User{UUID: "u1", Password: "p1"}, "NodeHub", true)
+	clash := renderClash(nodes, &store.User{UUID: "u1", Password: "p1"}, "NodeHub", true, true)
 	for _, want := range []string{
 		`"name":"⚡ 高速 UDP"`,
 		`"name":"🛡️ 稳定 TCP"`,
 		`"name":"故障转移","proxies":["⚡ 高速 UDP","🛡️ 稳定 TCP"]`,
+		`"name":"🌏 亚洲中转"`,
+		`"name":"🚀 欧美中转"`,
+		`"name":"🚀 中转·🇺🇸 洛杉矶"`,
+		`"name":"🚀 中转·🇸🇪 AWS-瑞典EC2"`,
+		`"dialer-proxy":"🌏 亚洲中转"`,
 		`"name":"日本"`,
 		`"name":"美国"`,
 		`"name":"欧洲"`,
@@ -503,37 +510,72 @@ func TestOptimizedRoutingGroups(t *testing.T) {
 			t.Fatalf("clash config missing %q:\n%s", want, clash)
 		}
 	}
+	// Ensure 🌏 亚洲中转 only contains direct Asia nodes (no proxy loop!)
+	for _, ln := range strings.Split(clash, "\n") {
+		if strings.Contains(ln, `"name":"🌏 亚洲中转"`) && strings.Contains(ln, "中转·") {
+			t.Fatalf("asia relay group must never contain relayed nodes: %s", ln)
+		}
+	}
 	for _, forbid := range []string{`"name":"新加坡"`, `"name":"香港"`, `"name":"台湾"`, `"name":"其他地区"`} {
 		if strings.Contains(clash, forbid) {
 			t.Fatalf("clash config must omit empty region group %s", forbid)
 		}
 	}
-	sbSmart := renderSingbox(nodes, &store.User{UUID: "u1", Password: "p1"}, true)
-	if !strings.Contains(sbSmart, "geosite-cn") || strings.Contains(sbSmart, `"tag": "新加坡"`) {
+	// Verify relay=false cleanly disables auto relays
+	clashOff := renderClash(nodes, &store.User{UUID: "u1", Password: "p1"}, "NodeHub", true, false)
+	if strings.Contains(clashOff, "🌏 亚洲中转") || strings.Contains(clashOff, "🚀 中转·") {
+		t.Fatalf("clash with relay=false must not emit relay groups:\n%s", clashOff)
+	}
+
+	sbSmart := renderSingbox(nodes, &store.User{UUID: "u1", Password: "p1"}, true, true)
+	for _, want := range []string{"geosite-cn", `"tag": "🌏 亚洲中转"`, `"tag": "🚀 欧美中转"`, `"tag": "🚀 中转·🇺🇸 洛杉矶"`, `"detour": "🌏 亚洲中转"`} {
+		if !strings.Contains(sbSmart, want) {
+			t.Fatalf("sing-box smart+relay missing %q:\n%s", want, sbSmart)
+		}
+	}
+	if strings.Contains(sbSmart, `"tag": "新加坡"`) {
 		t.Fatalf("sing-box smart config unexpected:\n%s", sbSmart)
 	}
-	sbGlobal := renderSingbox(nodes, &store.User{UUID: "u1", Password: "p1"}, false)
-	if strings.Contains(sbGlobal, "geosite-cn") {
-		t.Fatalf("sing-box global config must not include geosite-cn")
+	sbGlobal := renderSingbox(nodes, &store.User{UUID: "u1", Password: "p1"}, false, false)
+	if strings.Contains(sbGlobal, "geosite-cn") || strings.Contains(sbGlobal, "🌏 亚洲中转") {
+		t.Fatalf("sing-box global/no-relay unexpected:\n%s", sbGlobal)
+	}
+
+	// Surge drops VLESS so auto-relay falls back to Hy2 with underlying-proxy and NO port-hopping
+	surge := renderSurge(nodes, &store.User{UUID: "u1", Password: "p1"}, "https://example.com/sub/x", true, true)
+	if !strings.Contains(surge, "🚀 中转·🇺🇸 洛杉矶 = hysteria2,") || !strings.Contains(surge, "underlying-proxy=🌏 亚洲中转") || !strings.Contains(surge, "🌏 亚洲中转 = url-test,") {
+		t.Fatalf("surge auto-relay unexpected:\n%s", surge)
+	}
+	for _, ln := range strings.Split(surge, "\n") {
+		if strings.HasPrefix(ln, "🚀 中转·🇺🇸 洛杉矶 =") && strings.Contains(ln, "port-hopping=") {
+			t.Fatalf("relayed surge hysteria2 must strip port-hopping: %s", ln)
+		}
 	}
 }
 
 func TestHy2ClientBandwidth(t *testing.T) {
 	n := &store.Node{Name: "h", Protocol: "hysteria2", Core: "script", Port: 443}
 	n.Settings.SNI, n.Settings.SharedPassword = "a.example.com", "pw"
-	sn := subNode{Node: n, Name: "h", Addr: "1.2.3.4", UpMbps: 20, DownMbps: 80}
+	sn := subNode{Node: n, Name: "h", Addr: "1.2.3.4", UpMbps: 50, DownMbps: 200}
 	p := clashProxy(sn, &store.User{})
-	if p["up"] != "20 Mbps" || p["down"] != "80 Mbps" {
+	if p["up"] != "50 Mbps" || p["down"] != "200 Mbps" {
 		t.Fatalf("clash bandwidth: %v", p)
 	}
 	o := singboxOutbound(sn, &store.User{})
-	if o["up_mbps"] != 20 || o["down_mbps"] != 80 {
+	if o["up_mbps"] != 50 || o["down_mbps"] != 200 {
 		t.Fatalf("sing-box bandwidth: %v", o)
+	}
+	link := shareLink(sn, &store.User{})
+	if !strings.Contains(link, "upmbps=50") || !strings.Contains(link, "downmbps=200") {
+		t.Fatalf("hysteria2 shareLink must emit upmbps/downmbps for Shadowrocket/v2rayNG: %s", link)
 	}
 	sn.UpMbps, sn.DownMbps = 0, 0
 	p0 := clashProxy(sn, &store.User{})
 	if _, ok := p0["down"]; ok {
 		t.Fatal("no bandwidth must be written when unset")
+	}
+	if link0 := shareLink(sn, &store.User{}); strings.Contains(link0, "upmbps=") || strings.Contains(link0, "downmbps=") {
+		t.Fatalf("shareLink must not emit upmbps/downmbps when unset: %s", link0)
 	}
 	if p0["disable-mtu-discovery"] != true {
 		t.Fatalf("clash hysteria2 must set disable-mtu-discovery=true, got %v", p0)
@@ -546,9 +588,24 @@ func TestHy2ClientBandwidth(t *testing.T) {
 	if oHop := singboxOutbound(sn, &store.User{}); oHop["hop_interval"] != "60s" {
 		t.Fatalf("singbox hysteria2 hop_interval want 60s, got %v", oHop["hop_interval"])
 	}
-	clashYAML := renderClash([]subNode{sn}, &store.User{}, "x", false)
+	// Relayed Hy2 must attach dialer-proxy/detour and strip port hopping
+	snRelay := sn
+	snRelay.DialerProxy = "🌏 亚洲中转"
+	pRel := clashProxy(snRelay, &store.User{})
+	if pRel["dialer-proxy"] != "🌏 亚洲中转" || pRel["ports"] != nil {
+		t.Fatalf("relayed clash hy2 mismatch: %v", pRel)
+	}
+	oRel := singboxOutbound(snRelay, &store.User{})
+	if oRel["detour"] != "🌏 亚洲中转" || oRel["server_ports"] != nil {
+		t.Fatalf("relayed sing-box hy2 mismatch: %v", oRel)
+	}
+	clashYAML := renderClash([]subNode{sn}, &store.User{}, "x", false, true)
 	if strings.Contains(clashYAML, "cloudflare-dns.com") || strings.Contains(clashYAML, "dns.google") {
 		t.Fatalf("renderClash must not configure direct blocked foreign DoH:\n%s", clashYAML)
+	}
+	// No Asia nodes -> no auto relay groups emitted
+	if strings.Contains(clashYAML, "🌏 亚洲中转") {
+		t.Fatalf("renderClash must omit relay groups when no Asia nodes exist:\n%s", clashYAML)
 	}
 }
 
